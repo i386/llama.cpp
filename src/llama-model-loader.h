@@ -20,6 +20,17 @@ using llama_buf_map = std::unordered_map<uint32_t, ggml_backend_buffer_t>;
 // lists of buffer types used for each layer
 using buft_list_t = std::vector<std::pair<ggml_backend_dev_t, ggml_backend_buffer_type_t>>;
 
+struct llama_model_loader_stage_filter {
+    bool enabled = false;
+    int32_t layer_start = 0;
+    int32_t layer_end = 0;
+    bool include_embeddings = false;
+    bool include_output = false;
+};
+
+void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter & filter);
+void llama_model_loader_clear_stage_filter();
+
 enum llama_fver {
     GGUF_FILE_VERSION_V1 = 1,
     GGUF_FILE_VERSION_V2 = 2,

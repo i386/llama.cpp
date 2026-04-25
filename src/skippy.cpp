@@ -1,6 +1,7 @@
 #include "skippy.h"
 
 #include "gguf.h"
+#include "llama-model-loader.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -15,6 +16,7 @@
 struct skippy_model {
     llama_model * model = nullptr;
     skippy_runtime_config config = {};
+    bool executable = true;
 };
 
 struct skippy_session {
@@ -113,6 +115,29 @@ static bool skippy_is_full_model_config(const struct skippy_runtime_config * con
 
     return !config->filter_tensors_on_load && config->layer_start == 0;
 }
+
+struct skippy_filter_scope {
+    explicit skippy_filter_scope(const skippy_runtime_config * config) {
+        if (config != nullptr && config->filter_tensors_on_load) {
+            llama_model_loader_stage_filter filter;
+            filter.enabled = true;
+            filter.layer_start = config->layer_start;
+            filter.layer_end = config->layer_end;
+            filter.include_embeddings = config->include_embeddings;
+            filter.include_output = config->include_output;
+            llama_model_loader_set_stage_filter(filter);
+            enabled = true;
+        }
+    }
+
+    ~skippy_filter_scope() {
+        if (enabled) {
+            llama_model_loader_clear_stage_filter();
+        }
+    }
+
+    bool enabled = false;
+};
 
 static enum skippy_status skippy_decode_tokens(
         skippy_session * session,
@@ -213,7 +238,12 @@ enum skippy_status skippy_model_open(
 
     *out_model = nullptr;
 
-    if (!skippy_is_full_model_config(config)) {
+    if (config != nullptr && config->filter_tensors_on_load && config->layer_start >= config->layer_end) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "layer_start must be less than layer_end");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!skippy_is_full_model_config(config) && (config == nullptr || !config->filter_tensors_on_load)) {
         skippy_set_error(
                 out_error,
                 SKIPPY_STATUS_UNSUPPORTED,
@@ -224,9 +254,13 @@ enum skippy_status skippy_model_open(
     llama_model_params params = llama_model_default_params();
     if (config != nullptr) {
         params.n_gpu_layers = config->n_gpu_layers;
+        if (config->disable_repack || config->filter_tensors_on_load) {
+            params.use_extra_bufts = false;
+        }
     }
 
     llama_backend_init();
+    skippy_filter_scope filter_scope(config);
     llama_model * model = llama_model_load_from_file(path, params);
     if (model == nullptr) {
         skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, "failed to load llama model");
@@ -237,6 +271,7 @@ enum skippy_status skippy_model_open(
     stage_model->model = model;
     if (config != nullptr) {
         stage_model->config = *config;
+        stage_model->executable = !config->filter_tensors_on_load;
     }
 
     *out_model = stage_model;
@@ -260,6 +295,10 @@ enum skippy_status skippy_session_create(
     if (model == nullptr || model->model == nullptr || out_session == nullptr) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "model and out_session are required");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (!model->executable) {
+        skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "filtered runtime-slice handles are not executable yet");
+        return SKIPPY_STATUS_UNSUPPORTED;
     }
 
     *out_session = nullptr;

@@ -17,6 +17,16 @@ static const size_t kiB = 1024;
 static const size_t MiB = 1024*kiB;
 static const size_t GiB = 1024*MiB;
 
+static thread_local llama_model_loader_stage_filter g_skippy_filter;
+
+void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter & filter) {
+    g_skippy_filter = filter;
+}
+
+void llama_model_loader_clear_stage_filter() {
+    g_skippy_filter = {};
+}
+
 const char * llama_file_version_name(llama_fver version) {
     switch (version) {
         case GGUF_FILE_VERSION_V1: return "GGUF V1 (support until nov 2023)";
@@ -1098,6 +1108,40 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             info = llm_tensor_info_for(tn_tensor);
         } catch (const std::out_of_range & e) {
             throw std::runtime_error(format("missing tensor info mapping for %s", tn.str().c_str()));
+        }
+
+        if (g_skippy_filter.enabled) {
+            bool keep = true;
+            switch (info.layer) {
+                case LLM_TENSOR_LAYER_INPUT:
+                    keep = g_skippy_filter.include_embeddings;
+                    break;
+                case LLM_TENSOR_LAYER_OUTPUT:
+                    keep = g_skippy_filter.include_output;
+                    break;
+                case LLM_TENSOR_LAYER_REPEATING:
+                    keep = tn.bid >= g_skippy_filter.layer_start &&
+                           tn.bid <  g_skippy_filter.layer_end;
+                    break;
+                default:
+                    keep = true;
+                    break;
+            }
+
+            if (!keep) {
+                const size_t nbytes = ggml_nbytes(t_meta);
+                LLAMA_LOG_DEBUG(
+                        "llama_model_loader: stage filter skipping tensor %s (size = %zu bytes)\n",
+                        tn.str().c_str(),
+                        nbytes);
+
+                size_data -= nbytes;
+                if (!(flags & TENSOR_DUPLICATED)) {
+                    n_created++;
+                }
+
+                return nullptr;
+            }
         }
 
         // skip unused tensors
