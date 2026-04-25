@@ -172,6 +172,13 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
     const bool stage_filtered = stage_filter.enabled;
     const int il_start = stage_filtered ? std::min<int>(stage_filter.layer_start, static_cast<int>(n_layer)) : 0;
     const int il_end   = stage_filtered ? std::min<int>(stage_filter.layer_end,   static_cast<int>(n_layer)) : n_layer;
+    bool has_attention_layer = false;
+    for (int il = il_start; il < il_end; ++il) {
+        if (!hparams.is_recr(il)) {
+            has_attention_layer = true;
+            break;
+        }
+    }
 
     inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
@@ -179,7 +186,7 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
 
     auto * inp = build_inp_mem_hybrid();
 
-    ggml_tensor * inp_pos     = build_inp_pos();
+    ggml_tensor * inp_pos     = has_attention_layer ? build_inp_pos() : nullptr;
     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
