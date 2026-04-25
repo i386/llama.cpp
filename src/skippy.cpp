@@ -854,9 +854,9 @@ enum skippy_status skippy_model_open(
 
     if (config != nullptr && config->filter_tensors_on_load) {
         const int32_t n_layer = llama_model_n_layer(model);
-        if (model->arch != LLM_ARCH_LLAMA) {
+        if (model->arch != LLM_ARCH_LLAMA && model->arch != LLM_ARCH_QWEN35MOE) {
             llama_model_free(model);
-            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime-slice execution is currently supported for LLaMA-family graphs only");
+            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime-slice execution is currently supported for LLaMA-family and Qwen35MoE graphs only");
             return SKIPPY_STATUS_UNSUPPORTED;
         }
         if (config->layer_end > n_layer) {

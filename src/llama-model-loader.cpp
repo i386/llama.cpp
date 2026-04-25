@@ -1088,13 +1088,6 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     };
 
     auto buft_for_tensor = [&](ggml_tensor * t_meta) -> ggml_backend_buffer_type_t {
-        if (!t_meta) {
-            if (flags & TENSOR_NOT_REQUIRED) {
-                return nullptr;
-            }
-            throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
-        }
-
         // some models use the token embedding tensor as the output, but since these are used in different layers and with different ops
         // the tensor is duplicated
         // to handle this, we check if the tensor is duplicated, and if so, we assume that it is being loaded as the output tensor
@@ -1129,19 +1122,28 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             }
 
             if (!keep) {
-                const size_t nbytes = ggml_nbytes(t_meta);
-                LLAMA_LOG_DEBUG(
-                        "llama_model_loader: stage filter skipping tensor %s (size = %zu bytes)\n",
-                        tn.str().c_str(),
-                        nbytes);
+                if (t_meta) {
+                    const size_t nbytes = ggml_nbytes(t_meta);
+                    LLAMA_LOG_DEBUG(
+                            "llama_model_loader: stage filter skipping tensor %s (size = %zu bytes)\n",
+                            tn.str().c_str(),
+                            nbytes);
 
-                size_data -= nbytes;
-                if (!(flags & TENSOR_DUPLICATED)) {
-                    n_created++;
+                    size_data -= nbytes;
+                    if (!(flags & TENSOR_DUPLICATED)) {
+                        n_created++;
+                    }
                 }
 
                 return nullptr;
             }
+        }
+
+        if (!t_meta) {
+            if (flags & TENSOR_NOT_REQUIRED) {
+                return nullptr;
+            }
+            throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
         }
 
         // skip unused tensors
