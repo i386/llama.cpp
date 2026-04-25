@@ -284,6 +284,12 @@ LLAMA_API enum skippy_status skippy_write_slice_gguf(
         const char * output_path,
         struct skippy_error ** out_error);
 
+LLAMA_API enum skippy_status skippy_write_gguf_from_parts(
+        const char * const * input_paths,
+        size_t input_count,
+        const char * output_path,
+        struct skippy_error ** out_error);
+
 #ifdef __cplusplus
 }
 #endif
