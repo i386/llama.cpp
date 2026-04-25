@@ -19,6 +19,20 @@
 #include <sstream>
 #include <unordered_set>
 
+static thread_local skippy_graph_filter g_skippy_graph_filter;
+
+void skippy_graph_set_filter(const skippy_graph_filter & filter) {
+    g_skippy_graph_filter = filter;
+}
+
+void skippy_graph_clear_filter() {
+    g_skippy_graph_filter = {};
+}
+
+const skippy_graph_filter & skippy_graph_get_filter() {
+    return g_skippy_graph_filter;
+}
+
 // dedup helpers
 
 static ggml_tensor * build_attn_inp_kq_mask(
@@ -1842,28 +1856,32 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
     {
         auto & cur = inps[0];
 
-        cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+        if (tok_embd) {
+            cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
 
-        // apply lora for embedding tokens if needed
-        for (const auto & lora : *loras) {
-            llama_adapter_lora_weight * lw = lora.first->get_weight(tok_embd);
-            if (lw == nullptr) {
-                continue;
+            // apply lora for embedding tokens if needed
+            for (const auto & lora : *loras) {
+                llama_adapter_lora_weight * lw = lora.first->get_weight(tok_embd);
+                if (lw == nullptr) {
+                    continue;
+                }
+
+                const float adapter_scale = lora.second;
+                const float scale = lw->get_scale(lora.first->alpha, adapter_scale);
+
+                ggml_tensor * inpL_delta = ggml_scale(ctx0, ggml_mul_mat(
+                            ctx0, lw->b, // non-transposed lora_b
+                            ggml_get_rows(ctx0, lw->a, inp->tokens)
+                            ), scale);
+
+                cur = ggml_add(ctx0, cur, inpL_delta);
             }
 
-            const float adapter_scale = lora.second;
-            const float scale = lw->get_scale(lora.first->alpha, adapter_scale);
-
-            ggml_tensor * inpL_delta = ggml_scale(ctx0, ggml_mul_mat(
-                        ctx0, lw->b, // non-transposed lora_b
-                        ggml_get_rows(ctx0, lw->a, inp->tokens)
-                        ), scale);
-
-            cur = ggml_add(ctx0, cur, inpL_delta);
-        }
-
-        if (n_embd_inp != n_embd) {
-            cur = ggml_pad(ctx0, cur, hparams.n_embd_inp() - n_embd, 0, 0, 0);
+            if (n_embd_inp != n_embd) {
+                cur = ggml_pad(ctx0, cur, hparams.n_embd_inp() - n_embd, 0, 0, 0);
+            }
+        } else {
+            cur = inp->embd;
         }
     }
 
