@@ -1,7 +1,10 @@
 #include "skippy.h"
 
 #include "gguf.h"
+#include "llama-context.h"
 #include "llama-graph.h"
+#include "llama-kv-cache.h"
+#include "llama-memory-hybrid.h"
 #include "llama-model.h"
 #include "llama-model-loader.h"
 
@@ -784,7 +787,8 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_MODEL_INTROSPECTION |
            SKIPPY_FEATURE_GGUF_SLICE_WRITE |
            SKIPPY_FEATURE_TOKENIZE_DETOKENIZE |
-           SKIPPY_FEATURE_ACTIVATION_FRAME;
+           SKIPPY_FEATURE_ACTIVATION_FRAME |
+           SKIPPY_FEATURE_NATIVE_KV_PAGE;
 }
 
 const char * skippy_status_string(enum skippy_status status) {
@@ -1130,6 +1134,108 @@ enum skippy_status skippy_import_state(
     (void) input_bytes;
     skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "state import is not implemented yet");
     return SKIPPY_STATUS_UNSUPPORTED;
+}
+
+static llama_kv_cache * skippy_get_kv_cache(
+        skippy_session * session,
+        skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return nullptr;
+    }
+
+    llama_memory_t memory = session->ctx->get_memory();
+    if (memory == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "runtime memory is unavailable");
+        return nullptr;
+    }
+
+    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory)) {
+        llama_kv_cache * kv = hybrid->get_mem_attn();
+        if (kv == nullptr) {
+            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime has no attention KV cache");
+        }
+        return kv;
+    }
+    if (auto * kv = dynamic_cast<llama_kv_cache *>(memory)) {
+        return kv;
+    }
+
+    skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime memory type is not supported for native KV pages");
+    return nullptr;
+}
+
+enum skippy_status skippy_export_kv_page(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        uint64_t token_start,
+        uint64_t token_count,
+        struct skippy_kv_page_desc * out_desc,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    llama_kv_cache * kv = skippy_get_kv_cache(session, out_error);
+    if (kv == nullptr) {
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->ctx->synchronize();
+
+    std::string error;
+    const bool ok = kv->stage_export_kv_page(
+            layer_start,
+            layer_end,
+            token_start,
+            token_count,
+            out_desc,
+            output,
+            output_capacity,
+            out_bytes,
+            error);
+    if (!ok) {
+        const bool too_small = out_bytes != nullptr && *out_bytes > output_capacity;
+        const enum skippy_status status = too_small ? SKIPPY_STATUS_BUFFER_TOO_SMALL : SKIPPY_STATUS_RUNTIME_ERROR;
+        skippy_set_error(out_error, status, error.c_str());
+        return status;
+    }
+    if (output == nullptr || (out_bytes != nullptr && *out_bytes > output_capacity)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "native KV page output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_kv_page(
+        struct skippy_session * session,
+        const struct skippy_kv_page_desc * desc,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    if (desc == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "native KV page descriptor is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    llama_kv_cache * kv = skippy_get_kv_cache(session, out_error);
+    if (kv == nullptr) {
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    std::string error;
+    if (!kv->stage_import_kv_page(*desc, input, input_bytes, error)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, error.c_str());
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->n_past = std::max<int32_t>(
+            session->n_past,
+            static_cast<int32_t>(std::min<uint64_t>(
+                    desc->token_start + desc->token_count,
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))));
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
 }
 
 enum skippy_status skippy_tokenize(

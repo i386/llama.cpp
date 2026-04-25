@@ -37,6 +37,11 @@ enum skippy_feature {
     SKIPPY_FEATURE_STATE_IMPORT_EXPORT    = 1 << 5,
     SKIPPY_FEATURE_TOKENIZE_DETOKENIZE    = 1 << 6,
     SKIPPY_FEATURE_ACTIVATION_FRAME       = 1 << 7,
+    SKIPPY_FEATURE_NATIVE_KV_PAGE         = 1 << 8,
+};
+
+enum skippy_kv_page_flag {
+    SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED      = 1 << 0,
 };
 
 enum skippy_status {
@@ -121,6 +126,22 @@ struct skippy_activation_desc {
     int32_t layer_end;
     uint32_t token_count;
     uint32_t sequence_count;
+    uint64_t payload_bytes;
+    uint64_t flags;
+};
+
+struct skippy_kv_page_desc {
+    uint32_t version;
+    int32_t layer_start;
+    int32_t layer_end;
+    uint64_t token_start;
+    uint64_t token_count;
+    uint32_t layer_count;
+    uint32_t k_type;
+    uint32_t v_type;
+    uint32_t k_row_bytes;
+    uint32_t v_row_bytes;
+    uint32_t v_element_bytes;
     uint64_t payload_bytes;
     uint64_t flags;
 };
@@ -217,6 +238,25 @@ LLAMA_API enum skippy_status skippy_import_state(
         struct skippy_session * session,
         int32_t layer_start,
         int32_t layer_end,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_export_kv_page(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        uint64_t token_start,
+        uint64_t token_count,
+        struct skippy_kv_page_desc * out_desc,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_import_kv_page(
+        struct skippy_session * session,
+        const struct skippy_kv_page_desc * desc,
         const void * input,
         size_t input_bytes,
         struct skippy_error ** out_error);

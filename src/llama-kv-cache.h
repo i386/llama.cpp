@@ -6,12 +6,14 @@
 #include "llama-memory.h"
 
 #include <unordered_map>
+#include <string>
 #include <vector>
 
 struct llama_cparams;
 struct llama_hparams;
 struct llama_model;
 struct llama_context;
+struct skippy_kv_page_desc;
 
 //
 // llama_kv_cache
@@ -160,6 +162,23 @@ public:
 
     ggml_type type_k() const;
     ggml_type type_v() const;
+
+    bool stage_export_kv_page(
+            int32_t layer_start,
+            int32_t layer_end,
+            uint64_t token_start,
+            uint64_t token_count,
+            skippy_kv_page_desc * out_desc,
+            void * output,
+            size_t output_capacity,
+            size_t * out_bytes,
+            std::string & error) const;
+
+    bool stage_import_kv_page(
+            const skippy_kv_page_desc & desc,
+            const void * input,
+            size_t input_bytes,
+            std::string & error);
 
     //
     // graph_build API
