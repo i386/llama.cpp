@@ -788,7 +788,8 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_GGUF_SLICE_WRITE |
            SKIPPY_FEATURE_TOKENIZE_DETOKENIZE |
            SKIPPY_FEATURE_ACTIVATION_FRAME |
-           SKIPPY_FEATURE_NATIVE_KV_PAGE;
+           SKIPPY_FEATURE_NATIVE_KV_PAGE |
+           SKIPPY_FEATURE_SESSION_RESET;
 }
 
 const char * skippy_status_string(enum skippy_status status) {
@@ -933,6 +934,27 @@ enum skippy_status skippy_session_create(
     session->ctx = ctx;
     session->n_past = 0;
     *out_session = session;
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_session_reset(
+        struct skippy_session * session,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    session->ctx->synchronize();
+    llama_memory_t memory = session->ctx->get_memory();
+    if (memory == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "runtime memory is unavailable");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    llama_memory_clear(memory, true);
+    session->n_past = 0;
+    session->ctx->synchronize();
     return skippy_success(out_error);
 }
 
