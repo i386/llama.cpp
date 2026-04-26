@@ -1333,6 +1333,21 @@ enum skippy_status skippy_detokenize(
     return skippy_success(out_error);
 }
 
+enum skippy_status skippy_token_is_eog(
+        struct skippy_model * model,
+        llama_token token,
+        bool * out_is_eog,
+        struct skippy_error ** out_error) {
+    if (model == nullptr || model->model == nullptr || out_is_eog == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "model and out_is_eog are required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(model->model);
+    *out_is_eog = llama_vocab_is_eog(vocab, token);
+    return skippy_success(out_error);
+}
+
 enum skippy_status skippy_model_info_open(
         const char * path,
         struct skippy_model_info ** out_info,

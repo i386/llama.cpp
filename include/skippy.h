@@ -284,6 +284,12 @@ LLAMA_API enum skippy_status skippy_detokenize(
         size_t * out_text_bytes,
         struct skippy_error ** out_error);
 
+LLAMA_API enum skippy_status skippy_token_is_eog(
+        struct skippy_model * model,
+        llama_token token,
+        bool * out_is_eog,
+        struct skippy_error ** out_error);
+
 LLAMA_API enum skippy_status skippy_model_info_open(
         const char * path,
         struct skippy_model_info ** out_info,
