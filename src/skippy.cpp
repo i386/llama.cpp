@@ -660,11 +660,20 @@ static enum skippy_status skippy_decode_tokens(
         return SKIPPY_STATUS_INVALID_ARGUMENT;
     }
 
-    llama_batch batch = llama_batch_get_one(
-            const_cast<llama_token *>(token_ids),
-            static_cast<int32_t>(token_count));
+    const int32_t n_tokens = static_cast<int32_t>(token_count);
+    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    batch.n_tokens = n_tokens;
+    for (int32_t i = 0; i < n_tokens; ++i) {
+        batch.token[i] = token_ids[i];
+        batch.pos[i] = session->n_past + i;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i] = request_logits && i == n_tokens - 1 ? 1 : 0;
+    }
 
-    return skippy_decode_batch(session, batch, token_count, out_error);
+    enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
+    llama_batch_free(batch);
+    return status;
 }
 
 static llama_token skippy_greedy_sample(skippy_session * session) {
