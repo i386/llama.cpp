@@ -1262,22 +1262,23 @@ bool llama_kv_cache::stage_export_kv_page(
     }
     const auto & cells = v_cells[strm];
 
-    std::vector<uint32_t> cell_idxs;
-    cell_idxs.reserve(static_cast<size_t>(token_count));
-    for (uint64_t pos_u = token_start; pos_u < token_start + token_count; ++pos_u) {
-        const llama_pos pos = static_cast<llama_pos>(pos_u);
-        bool found = false;
-        for (uint32_t i = 0; i < cells.size(); ++i) {
-            if (cells.seq_has(i, 0) && cells.pos_get(i) == pos) {
-                cell_idxs.push_back(i);
-                found = true;
-                break;
-            }
+    std::vector<uint32_t> cell_idxs(static_cast<size_t>(token_count), std::numeric_limits<uint32_t>::max());
+    uint32_t found_cells = 0;
+    const llama_pos pos_start = static_cast<llama_pos>(token_start);
+    const llama_pos pos_end = static_cast<llama_pos>(token_start + token_count);
+    for (uint32_t i = 0; i < cells.size() && found_cells < token_count; ++i) {
+        if (!cells.seq_has(i, 0) || !cells.pos_in(i, pos_start, pos_end)) {
+            continue;
         }
-        if (!found) {
-            error = "requested token position is not present in the KV cache";
-            return false;
+        const size_t token_index = static_cast<size_t>(cells.pos_get(i) - pos_start);
+        if (token_index < cell_idxs.size() && cell_idxs[token_index] == std::numeric_limits<uint32_t>::max()) {
+            cell_idxs[token_index] = i;
+            ++found_cells;
         }
+    }
+    if (found_cells != token_count) {
+        error = "requested token position is not present in the KV cache";
+        return false;
     }
 
     std::vector<const kv_layer *> selected;
