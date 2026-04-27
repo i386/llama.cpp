@@ -40,6 +40,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_NATIVE_KV_PAGE         = 1 << 8,
     SKIPPY_FEATURE_SESSION_RESET          = 1 << 9,
     SKIPPY_FEATURE_BATCH_VERIFY           = 1 << 10,
+    SKIPPY_FEATURE_CHAT_TEMPLATE          = 1 << 11,
 };
 
 enum skippy_kv_page_flag {
@@ -298,6 +299,19 @@ LLAMA_API enum skippy_status skippy_token_is_eog(
         struct skippy_model * model,
         llama_token token,
         bool * out_is_eog,
+        struct skippy_error ** out_error);
+
+LLAMA_API const struct llama_model * skippy_model_native_model(
+        const struct skippy_model * model);
+
+LLAMA_API enum skippy_status skippy_apply_chat_template(
+        struct skippy_model * model,
+        const struct llama_chat_message * messages,
+        size_t message_count,
+        bool add_assistant,
+        char * output_text,
+        size_t output_text_capacity,
+        size_t * out_text_bytes,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_model_info_open(

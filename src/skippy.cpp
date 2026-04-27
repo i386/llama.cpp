@@ -1427,6 +1427,14 @@ enum skippy_status skippy_token_is_eog(
     return skippy_success(out_error);
 }
 
+const struct llama_model * skippy_model_native_model(
+        const struct skippy_model * model) {
+    if (model == nullptr) {
+        return nullptr;
+    }
+    return model->model;
+}
+
 enum skippy_status skippy_model_info_open(
         const char * path,
         struct skippy_model_info ** out_info,

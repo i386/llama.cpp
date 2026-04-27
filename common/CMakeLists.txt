@@ -102,6 +102,7 @@ add_library(${TARGET}
     regex-partial.h
     sampling.cpp
     sampling.h
+    stage-chat.cpp
     speculative.cpp
     speculative.h
     unicode.cpp
