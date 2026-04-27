@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 8
+#define SKIPPY_ABI_VERSION_PATCH 9
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -48,6 +48,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_RECURRENT_STATE        = 1 << 14,
     SKIPPY_FEATURE_LOGIT_BIAS             = 1 << 15,
     SKIPPY_FEATURE_SESSION_TRIM           = 1 << 16,
+    SKIPPY_FEATURE_SESSION_CHECKPOINT     = 1 << 17,
 };
 
 enum skippy_kv_page_flag {
@@ -203,6 +204,16 @@ LLAMA_API enum skippy_status skippy_session_create(
 
 LLAMA_API enum skippy_status skippy_session_reset(
         struct skippy_session * session,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_checkpoint_session(
+        struct skippy_session * session,
+        uint64_t * out_token_count,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_restore_session_checkpoint(
+        struct skippy_session * session,
+        uint64_t token_count,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_session_free(
