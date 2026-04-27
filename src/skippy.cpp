@@ -328,6 +328,12 @@ static size_t skippy_align(size_t value, size_t alignment) {
     return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
 }
 
+static void skippy_clear_split_metadata(gguf_context * ctx) {
+    gguf_remove_key(ctx, "split.no");
+    gguf_remove_key(ctx, "split.count");
+    gguf_remove_key(ctx, "split.tensors.count");
+}
+
 static skippy_model_info * skippy_model_info_open_owned(const char * path) {
     gguf_init_params params = {
         /*.no_alloc =*/ true,
@@ -2364,6 +2370,7 @@ enum skippy_status skippy_write_slice_gguf(
     }
 
     gguf_set_kv(out_ctx, info->ctx);
+    skippy_clear_split_metadata(out_ctx);
     gguf_set_val_u32(out_ctx, GGUF_KEY_GENERAL_ALIGNMENT, static_cast<uint32_t>(gguf_get_alignment(out_ctx)));
     gguf_set_val_i32(out_ctx, "skippy.slice.stage_index", stage_index);
     gguf_set_val_i32(out_ctx, "skippy.slice.layer_start", range->layer_start);
@@ -2454,6 +2461,7 @@ enum skippy_status skippy_write_gguf_from_parts(
     }
 
     gguf_set_kv(out_ctx, sources.front()->ctx);
+    skippy_clear_split_metadata(out_ctx);
     gguf_set_val_u32(out_ctx, GGUF_KEY_GENERAL_ALIGNMENT, static_cast<uint32_t>(gguf_get_alignment(out_ctx)));
     gguf_set_val_bool(out_ctx, "skippy.package.materialized", true);
     gguf_set_val_u32(out_ctx, "skippy.package.part_count", static_cast<uint32_t>(input_count));
