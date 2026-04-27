@@ -500,6 +500,26 @@ struct skippy_graph_filter_scope {
     bool enabled = false;
 };
 
+struct skippy_activation_tokens_scope {
+    skippy_activation_tokens_scope(const llama_token * tokens, size_t token_count) {
+        if (tokens != nullptr && token_count > 0 && token_count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+            skippy_activation_tokens stage_tokens;
+            stage_tokens.tokens = tokens;
+            stage_tokens.token_count = static_cast<uint32_t>(token_count);
+            skippy_graph_set_activation_tokens(stage_tokens);
+            enabled = true;
+        }
+    }
+
+    ~skippy_activation_tokens_scope() {
+        if (enabled) {
+            skippy_graph_clear_activation_tokens();
+        }
+    }
+
+    bool enabled = false;
+};
+
 static bool skippy_is_filtered(const skippy_session * session) {
     return session != nullptr &&
            session->stage_model != nullptr &&
@@ -771,6 +791,7 @@ static enum skippy_status skippy_decode_activation_frame(
         skippy_session * session,
         const skippy_activation_desc * input_desc,
         const void * input_payload,
+        const llama_token * token_ids,
         size_t token_count,
         bool request_logits,
         struct skippy_error ** out_error) {
@@ -796,6 +817,7 @@ static enum skippy_status skippy_decode_activation_frame(
         batch.logits[i] = request_logits && i == n_tokens - 1 ? 1 : 0;
     }
 
+    skippy_activation_tokens_scope activation_tokens_scope(token_ids, token_count);
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     llama_batch_free(batch);
     return status;
@@ -815,6 +837,7 @@ uint64_t skippy_abi_features(void) {
     return SKIPPY_FEATURE_RUNTIME_SLICE |
            SKIPPY_FEATURE_MODEL_INTROSPECTION |
            SKIPPY_FEATURE_GGUF_SLICE_WRITE |
+           SKIPPY_FEATURE_STATE_IMPORT_EXPORT |
            SKIPPY_FEATURE_TOKENIZE_DETOKENIZE |
            SKIPPY_FEATURE_ACTIVATION_FRAME |
            SKIPPY_FEATURE_NATIVE_KV_PAGE |
@@ -889,9 +912,22 @@ enum skippy_status skippy_model_open(
 
     if (config != nullptr && config->filter_tensors_on_load) {
         const int32_t n_layer = llama_model_n_layer(model);
-        if (model->arch != LLM_ARCH_LLAMA && model->arch != LLM_ARCH_QWEN35MOE) {
+        if (model->arch != LLM_ARCH_LLAMA &&
+            model->arch != LLM_ARCH_QWEN2 &&
+            model->arch != LLM_ARCH_QWEN3 &&
+            model->arch != LLM_ARCH_QWEN3NEXT &&
+            model->arch != LLM_ARCH_QWEN35MOE &&
+            model->arch != LLM_ARCH_GEMMA &&
+            model->arch != LLM_ARCH_GEMMA2 &&
+            model->arch != LLM_ARCH_GEMMA3 &&
+            model->arch != LLM_ARCH_GEMMA4 &&
+            model->arch != LLM_ARCH_GLM4 &&
+            model->arch != LLM_ARCH_DEEPSEEK2 &&
+            model->arch != LLM_ARCH_FALCON_H1 &&
+            model->arch != LLM_ARCH_MINIMAX_M2 &&
+            model->arch != LLM_ARCH_OLMO) {
             llama_model_free(model);
-            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime-slice execution is currently supported for LLaMA-family and Qwen35MoE graphs only");
+            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime-slice execution is not supported for this model architecture yet");
             return SKIPPY_STATUS_UNSUPPORTED;
         }
         if (config->layer_end > n_layer) {
@@ -1143,7 +1179,7 @@ enum skippy_status skippy_prefill_chunk_frame(
     }
 
     if (skippy_is_filtered(session) && session->stage_model->config.layer_start > 0) {
-        status = skippy_decode_activation_frame(session, input_desc, input_payload, token_count, false, out_error);
+        status = skippy_decode_activation_frame(session, input_desc, input_payload, token_ids, token_count, false, out_error);
     } else {
         status = skippy_decode_tokens(session, token_ids, token_count, false, out_error);
     }
@@ -1188,7 +1224,7 @@ enum skippy_status skippy_decode_step_frame(
     }
 
     if (skippy_is_filtered(session) && session->stage_model->config.layer_start > 0) {
-        status = skippy_decode_activation_frame(session, input_desc, input_payload, 1, true, out_error);
+        status = skippy_decode_activation_frame(session, input_desc, input_payload, &token_id, 1, true, out_error);
     } else {
         status = skippy_decode_tokens(session, &token_id, 1, true, out_error);
     }
@@ -1211,14 +1247,51 @@ enum skippy_status skippy_export_state(
         size_t output_capacity,
         size_t * out_bytes,
         struct skippy_error ** out_error) {
-    (void) session;
-    (void) layer_start;
-    (void) layer_end;
-    (void) output;
-    (void) output_capacity;
-    (void) out_bytes;
-    skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "state export is not implemented yet");
-    return SKIPPY_STATUS_UNSUPPORTED;
+    if (out_bytes != nullptr) {
+        *out_bytes = 0;
+    }
+    if (session == nullptr || session->ctx == nullptr || session->stage_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const skippy_runtime_config & config = session->stage_model->config;
+    const int32_t expected_layer_start = config.filter_tensors_on_load ? config.layer_start : 0;
+    const int32_t expected_layer_end = config.filter_tensors_on_load ?
+            config.layer_end : llama_model_n_layer(session->stage_model->model);
+    if (layer_start != expected_layer_start || layer_end != expected_layer_end) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state range must match the session layer range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    session->ctx->synchronize();
+    const size_t required = llama_state_seq_get_size_ext(session->ctx, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (out_bytes != nullptr) {
+        *out_bytes = required;
+    }
+    if (required == 0) {
+        return skippy_success(out_error);
+    }
+    if (output == nullptr || output_capacity < required) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "state output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const size_t written = llama_state_seq_get_data_ext(
+            session->ctx,
+            static_cast<uint8_t *>(output),
+            output_capacity,
+            0,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (written != required) {
+        if (out_bytes != nullptr) {
+            *out_bytes = written;
+        }
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to export sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    return skippy_success(out_error);
 }
 
 enum skippy_status skippy_import_state(
@@ -1228,13 +1301,152 @@ enum skippy_status skippy_import_state(
         const void * input,
         size_t input_bytes,
         struct skippy_error ** out_error) {
-    (void) session;
-    (void) layer_start;
-    (void) layer_end;
-    (void) input;
-    (void) input_bytes;
-    skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "state import is not implemented yet");
-    return SKIPPY_STATUS_UNSUPPORTED;
+    if (session == nullptr || session->ctx == nullptr || session->stage_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (input == nullptr && input_bytes > 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state input is required when input_bytes is non-zero");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const skippy_runtime_config & config = session->stage_model->config;
+    const int32_t expected_layer_start = config.filter_tensors_on_load ? config.layer_start : 0;
+    const int32_t expected_layer_end = config.filter_tensors_on_load ?
+            config.layer_end : llama_model_n_layer(session->stage_model->model);
+    if (layer_start != expected_layer_start || layer_end != expected_layer_end) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state range must match the session layer range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t imported_cells = 0;
+    if (input_bytes >= sizeof(imported_cells)) {
+        std::memcpy(&imported_cells, input, sizeof(imported_cells));
+    }
+
+    session->ctx->synchronize();
+    const size_t read = llama_state_seq_set_data_ext(
+            session->ctx,
+            static_cast<const uint8_t *>(input),
+            input_bytes,
+            0,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (read != input_bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->n_past = std::max<int32_t>(
+            session->n_past,
+            static_cast<int32_t>(std::min<uint32_t>(
+                    imported_cells,
+                    static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))));
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_export_full_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    if (out_bytes != nullptr) {
+        *out_bytes = 0;
+    }
+    if (session == nullptr || session->ctx == nullptr || session->stage_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const skippy_runtime_config & config = session->stage_model->config;
+    const int32_t expected_layer_start = config.filter_tensors_on_load ? config.layer_start : 0;
+    const int32_t expected_layer_end = config.filter_tensors_on_load ?
+            config.layer_end : llama_model_n_layer(session->stage_model->model);
+    if (layer_start != expected_layer_start || layer_end != expected_layer_end) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state range must match the session layer range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    session->ctx->synchronize();
+    const size_t required = llama_state_seq_get_size(session->ctx, 0);
+    if (out_bytes != nullptr) {
+        *out_bytes = required;
+    }
+    if (required == 0) {
+        return skippy_success(out_error);
+    }
+    if (output == nullptr || output_capacity < required) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "full state output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const size_t written = llama_state_seq_get_data(
+            session->ctx,
+            static_cast<uint8_t *>(output),
+            output_capacity,
+            0);
+    if (written != required) {
+        if (out_bytes != nullptr) {
+            *out_bytes = written;
+        }
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to export full sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_full_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr || session->stage_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (input == nullptr && input_bytes > 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state input is required when input_bytes is non-zero");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const skippy_runtime_config & config = session->stage_model->config;
+    const int32_t expected_layer_start = config.filter_tensors_on_load ? config.layer_start : 0;
+    const int32_t expected_layer_end = config.filter_tensors_on_load ?
+            config.layer_end : llama_model_n_layer(session->stage_model->model);
+    if (layer_start != expected_layer_start || layer_end != expected_layer_end) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state range must match the session layer range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t imported_cells = 0;
+    if (input_bytes >= 2 * sizeof(uint32_t)) {
+        std::memcpy(&imported_cells, static_cast<const uint8_t *>(input) + sizeof(uint32_t), sizeof(imported_cells));
+    }
+
+    session->ctx->synchronize();
+    const size_t read = llama_state_seq_set_data(
+            session->ctx,
+            static_cast<const uint8_t *>(input),
+            input_bytes,
+            0);
+    if (read != input_bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import full sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->n_past = std::max<int32_t>(
+            session->n_past,
+            static_cast<int32_t>(std::min<uint32_t>(
+                    imported_cells,
+                    static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))));
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
 }
 
 static llama_kv_cache * skippy_get_kv_cache(

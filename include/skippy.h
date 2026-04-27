@@ -258,6 +258,23 @@ LLAMA_API enum skippy_status skippy_import_state(
         size_t input_bytes,
         struct skippy_error ** out_error);
 
+LLAMA_API enum skippy_status skippy_export_full_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_import_full_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error);
+
 LLAMA_API enum skippy_status skippy_export_kv_page(
         struct skippy_session * session,
         int32_t layer_start,

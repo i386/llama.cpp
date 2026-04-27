@@ -20,6 +20,7 @@
 #include <unordered_set>
 
 static thread_local skippy_graph_filter g_skippy_graph_filter;
+static thread_local skippy_activation_tokens g_skippy_activation_tokens;
 
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
     g_skippy_graph_filter = filter;
@@ -31,6 +32,18 @@ void skippy_graph_clear_filter() {
 
 const skippy_graph_filter & skippy_graph_get_filter() {
     return g_skippy_graph_filter;
+}
+
+void skippy_graph_set_activation_tokens(const skippy_activation_tokens & tokens) {
+    g_skippy_activation_tokens = tokens;
+}
+
+void skippy_graph_clear_activation_tokens() {
+    g_skippy_activation_tokens = {};
+}
+
+const skippy_activation_tokens & skippy_graph_get_activation_tokens() {
+    return g_skippy_activation_tokens;
 }
 
 // dedup helpers
@@ -151,6 +164,18 @@ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
     res &= (!params.ubatch.embd)  || (h      && h->ne[1]      == params.ubatch.n_tokens);
 
     return res;
+}
+
+void llm_graph_input_stage_tokens::set_input(const llama_ubatch * ubatch) {
+    const skippy_activation_tokens & stage_tokens = skippy_graph_get_activation_tokens();
+    GGML_ASSERT(stage_tokens.tokens != nullptr);
+    GGML_ASSERT(stage_tokens.token_count == ubatch->n_tokens);
+
+    ggml_backend_tensor_set(tokens, stage_tokens.tokens, 0, stage_tokens.token_count*ggml_element_size(tokens));
+}
+
+bool llm_graph_input_stage_tokens::can_reuse(const llm_graph_params & params) {
+    return tokens && tokens->ne[0] == params.ubatch.n_tokens;
 }
 
 void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {

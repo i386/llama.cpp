@@ -80,10 +80,18 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    // Only process up to last layer (skip final NextN layer)
+    // Final layer tensors are loaded but not processed in forward pass
+    const int n_transformer_layers = n_layer;
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? std::min(stage_filter.layer_end, n_transformer_layers) : n_transformer_layers;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     bool use_mrope = hparams.use_mrope();
-    if (ubatch.embd && !use_mrope) {
+    if (ubatch.embd && !use_mrope && !stage_filtered) {
         // unfortunately, we need to forcefully stop here, to avoid users complaining about wrong results
         GGML_ABORT("This GGUF does not support multimodal. Please reconvert it.");
     }
@@ -93,11 +101,11 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
 
     auto * inp_attn = build_attn_inp_kv();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
     // Only process up to last layer (skip final NextN layer)
     // Final layer tensors are loaded but not processed in forward pass
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         ggml_tensor * inpSA = inpL;
 
         // Pre-attention norm
@@ -136,7 +144,7 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
         }
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -174,8 +182,17 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
         // input for next layer
         inpL = cur;
     }
+    cur = inpL;
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
+
     // Final norm
-    cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
+    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;

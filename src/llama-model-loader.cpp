@@ -1121,6 +1121,13 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                     break;
             }
 
+            if (!keep && llm_kv.arch == LLM_ARCH_GEMMA4 && hparams.n_embd_per_layer > 0) {
+                keep = tn.tensor == LLM_TENSOR_TOKEN_EMBD ||
+                       tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD ||
+                       tn.tensor == LLM_TENSOR_PER_LAYER_MODEL_PROJ ||
+                       tn.tensor == LLM_TENSOR_PER_LAYER_PROJ_NORM;
+            }
+
             if (!keep) {
                 if (t_meta) {
                     const size_t nbytes = ggml_nbytes(t_meta);

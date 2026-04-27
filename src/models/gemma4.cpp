@@ -98,8 +98,9 @@ void llama_model_gemma4::load_arch_tensors(llama_model_loader &) {
         layer.ffn_post_norm = create_tensor(tn(LLM_TENSOR_FFN_POST_NORM, "weight", i), {n_embd}, 0);
 
         // MoE router
+        const std::string ffn_gate_inp_name = tn(LLM_TENSOR_FFN_GATE_INP, "weight", i).str();
         layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, TENSOR_NOT_REQUIRED);
-        bool has_expert = layer.ffn_gate_inp != nullptr;
+        bool has_expert = layer.ffn_gate_inp != nullptr || ml->get_tensor_meta(ffn_gate_inp_name.c_str()) != nullptr;
 
         // norm
         if (has_expert) {
@@ -176,7 +177,12 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     // important: do not normalize weights for raw embeddings input (i.e. encoded image emdeddings)
     inpL = ggml_scale(ctx0, inpL, ubatch.token ? sqrtf(n_embd) : 1.0f);
@@ -188,18 +194,39 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
     // TODO: is causal == true correct? might need some changes
     auto * inp_attn = build_attn_inp_kv_iswa();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
     ggml_tensor * inp_per_layer = nullptr;
     if (model.per_layer_tok_embd) {
+        ggml_tensor * inp_per_layer_proj = inpL;
+        const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
+        const bool use_activation_token_sideband =
+            stage_filtered && il_start > 0 &&
+            activation_tokens.tokens != nullptr &&
+            activation_tokens.token_count == ubatch.n_tokens &&
+            model.tok_embd != nullptr;
+
+        if (use_activation_token_sideband) {
+            auto inp = std::make_unique<llm_graph_input_stage_tokens>();
+            inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
+            cb(inp->tokens, "inp_stage_tokens", -1);
+            ggml_set_input(inp->tokens);
+
+            inp_per_layer_proj = ggml_get_rows(ctx0, model.tok_embd, inp->tokens);
+            inp_per_layer_proj = ggml_scale(ctx0, inp_per_layer_proj, sqrtf(n_embd));
+            cb(inp_per_layer_proj, "inp_per_layer_proj_embd", -1);
+
+            res->add_input(std::move(inp));
+        }
+
         inp_per_layer = build_inp_per_layer();
         ggml_build_forward_expand(gf, inp_per_layer);
 
         // inp_per_layer shape: [n_embd_per_layer, n_tokens, n_layer]
-        inp_per_layer = project_per_layer_inputs(inpL, inp_per_layer);
+        inp_per_layer = project_per_layer_inputs(inp_per_layer_proj, inp_per_layer);
     }
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         const int64_t n_embd_head = hparams.n_embd_head_k(il);
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_v(il));
 
@@ -275,7 +302,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
 
         // TODO @ngxson : strip unused token right after the last KV layer to speed up prompt processing
         // keep all rows when extracting unmasked nextn embeddings (MTP target needs the hidden state for every token)
-        if (il == n_layer - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
+        if (il == il_end - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
             cur  = ggml_get_rows(ctx0,  cur, inp_out_ids);
             inpL = ggml_get_rows(ctx0, inpL, inp_out_ids);
         }
@@ -402,6 +429,13 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
     }
     cur = inpL;
 
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
+
     cur = build_norm(cur,
             model.output_norm, nullptr,
             LLM_NORM_RMS, -1);
@@ -452,7 +486,12 @@ ggml_tensor * llama_model_gemma4::graph::build_inp_per_layer() {
 
     ggml_tensor * inp_per_layer;
     float tok_embd_scale = sqrtf((float) n_embd_per_layer);
-    if (ubatch.token) {
+    const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
+    const bool use_activation_token_sideband =
+        activation_tokens.tokens != nullptr &&
+        activation_tokens.token_count == ubatch.n_tokens;
+
+    if (ubatch.token || use_activation_token_sideband) {
         inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
         ggml_set_input(inp->tokens);
         res->t_inp_tokens = inp->tokens;
@@ -462,7 +501,13 @@ ggml_tensor * llama_model_gemma4::graph::build_inp_per_layer() {
         inp_per_layer = ggml_scale     (ctx0, inp_per_layer, tok_embd_scale);
         cb(inp_per_layer, "inp_per_layer_selected", -1);
 
-        res->add_input(std::move(inp));
+        if (ubatch.token) {
+            res->add_input(std::move(inp));
+        } else {
+            auto stage_inp = std::make_unique<llm_graph_input_stage_tokens>();
+            stage_inp->tokens = inp->tokens;
+            res->add_input(std::move(stage_inp));
+        }
     } else {
         // Multimodal embedding path: use padding token (ID=0) embedding
         // TODO: verify if this is the correct behavior in transformers implementation
