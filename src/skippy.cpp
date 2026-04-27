@@ -5,6 +5,8 @@
 #include "llama-graph.h"
 #include "llama-kv-cache.h"
 #include "llama-memory-hybrid.h"
+#include "llama-memory-hybrid-iswa.h"
+#include "llama-memory-recurrent.h"
 #include "llama-model.h"
 #include "llama-model-loader.h"
 
@@ -974,7 +976,8 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_NATIVE_KV_PAGE |
            SKIPPY_FEATURE_SESSION_RESET |
            SKIPPY_FEATURE_BATCH_VERIFY |
-           SKIPPY_FEATURE_BATCH_VERIFY_FRAME;
+           SKIPPY_FEATURE_BATCH_VERIFY_FRAME |
+           SKIPPY_FEATURE_RECURRENT_STATE;
 }
 
 const char * skippy_status_string(enum skippy_status status) {
@@ -1708,6 +1711,128 @@ enum skippy_status skippy_import_full_state(
             static_cast<int32_t>(std::min<uint32_t>(
                     imported_cells,
                     static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))));
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
+}
+
+static llama_memory_recurrent * skippy_get_recurrent_memory(
+        skippy_session * session,
+        skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return nullptr;
+    }
+
+    llama_memory_t memory = session->ctx->get_memory();
+    if (memory == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "runtime memory is unavailable");
+        return nullptr;
+    }
+
+    if (auto * recurrent = dynamic_cast<llama_memory_recurrent *>(memory)) {
+        return recurrent;
+    }
+    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory)) {
+        return hybrid->get_mem_recr();
+    }
+    if (auto * hybrid_iswa = dynamic_cast<llama_memory_hybrid_iswa *>(memory)) {
+        return hybrid_iswa->get_mem_recr();
+    }
+
+    return nullptr;
+}
+
+enum skippy_status skippy_export_recurrent_state(
+        struct skippy_session * session,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    if (out_bytes == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "out_bytes is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_bytes = 0;
+    skippy_error * recurrent_error = nullptr;
+    llama_memory_recurrent * recurrent = skippy_get_recurrent_memory(session, &recurrent_error);
+    if (recurrent_error != nullptr) {
+        if (out_error != nullptr) {
+            *out_error = recurrent_error;
+        } else {
+            skippy_error_free(recurrent_error);
+        }
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    if (recurrent == nullptr) {
+        return skippy_success(out_error);
+    }
+
+    session->ctx->synchronize();
+    const size_t bytes = llama_state_seq_get_size_ext(session->ctx, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    *out_bytes = bytes;
+    if (bytes == 0) {
+        return skippy_success(out_error);
+    }
+    if (output == nullptr || output_capacity < bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "recurrent state output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const size_t written = llama_state_seq_get_data_ext(
+            session->ctx,
+            static_cast<uint8_t *>(output),
+            output_capacity,
+            0,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (written != bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to export recurrent state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_recurrent_state(
+        struct skippy_session * session,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    if (input_bytes == 0) {
+        return skippy_success(out_error);
+    }
+    if (input == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "recurrent state input is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    skippy_error * recurrent_error = nullptr;
+    llama_memory_recurrent * recurrent = skippy_get_recurrent_memory(session, &recurrent_error);
+    if (recurrent_error != nullptr) {
+        if (out_error != nullptr) {
+            *out_error = recurrent_error;
+        } else {
+            skippy_error_free(recurrent_error);
+        }
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    if (recurrent == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime has no recurrent memory");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+
+    session->ctx->synchronize();
+    const size_t read = llama_state_seq_set_data_ext(
+            session->ctx,
+            static_cast<const uint8_t *>(input),
+            input_bytes,
+            0,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (read != input_bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import recurrent state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
     session->ctx->synchronize();
 
     return skippy_success(out_error);
