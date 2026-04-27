@@ -990,8 +990,12 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_NATIVE_KV_PAGE |
            SKIPPY_FEATURE_SESSION_RESET |
            SKIPPY_FEATURE_BATCH_VERIFY |
+           SKIPPY_FEATURE_CHAT_TEMPLATE |
+           SKIPPY_FEATURE_SAMPLING_CONFIG |
            SKIPPY_FEATURE_BATCH_VERIFY_FRAME |
-           SKIPPY_FEATURE_RECURRENT_STATE;
+           SKIPPY_FEATURE_RECURRENT_STATE |
+           SKIPPY_FEATURE_LOGIT_BIAS |
+           SKIPPY_FEATURE_SESSION_TRIM;
 }
 
 const char * skippy_status_string(enum skippy_status status) {
@@ -1847,6 +1851,61 @@ enum skippy_status skippy_import_recurrent_state(
         skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import recurrent state");
         return SKIPPY_STATUS_RUNTIME_ERROR;
     }
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
+}
+
+static llama_kv_cache * skippy_get_kv_cache(
+        skippy_session * session,
+        skippy_error ** out_error);
+
+enum skippy_status skippy_trim_session(
+        struct skippy_session * session,
+        uint64_t token_count,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (token_count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "token_count exceeds int32_t range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (token_count > static_cast<uint64_t>(session->n_past)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "cannot trim session beyond current token count");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    session->ctx->synchronize();
+    llama_memory_t memory = session->ctx->get_memory();
+    if (memory == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "runtime memory is unavailable");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    const llama_pos p0 = static_cast<llama_pos>(token_count);
+    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory)) {
+        llama_kv_cache * kv = hybrid->get_mem_attn();
+        if (kv != nullptr && !kv->seq_rm(0, p0, -1)) {
+            skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to trim hybrid attention KV suffix");
+            return SKIPPY_STATUS_RUNTIME_ERROR;
+        }
+    } else if (auto * hybrid_iswa = dynamic_cast<llama_memory_hybrid_iswa *>(memory)) {
+        llama_kv_cache_iswa * kv = hybrid_iswa->get_mem_attn();
+        if (kv != nullptr && !kv->seq_rm(0, p0, -1)) {
+            skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to trim hybrid ISWA attention KV suffix");
+            return SKIPPY_STATUS_RUNTIME_ERROR;
+        }
+    } else if (auto * kv = dynamic_cast<llama_kv_cache *>(memory)) {
+        if (!kv->seq_rm(0, p0, -1)) {
+            skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to trim native KV suffix");
+            return SKIPPY_STATUS_RUNTIME_ERROR;
+        }
+    } else if (dynamic_cast<llama_memory_recurrent *>(memory) == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime memory type is not supported for trim");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+    session->n_past = static_cast<int32_t>(token_count);
     session->ctx->synchronize();
 
     return skippy_success(out_error);
