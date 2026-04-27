@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 1
+#define SKIPPY_ABI_VERSION_PATCH 2
 
 enum skippy_feature {
     SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
@@ -39,6 +39,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_ACTIVATION_FRAME       = 1 << 7,
     SKIPPY_FEATURE_NATIVE_KV_PAGE         = 1 << 8,
     SKIPPY_FEATURE_SESSION_RESET          = 1 << 9,
+    SKIPPY_FEATURE_BATCH_VERIFY           = 1 << 10,
 };
 
 enum skippy_kv_page_flag {
@@ -204,6 +205,15 @@ LLAMA_API enum skippy_status skippy_decode_step(
         size_t output_activation_capacity,
         size_t * out_output_activation_bytes,
         llama_token * out_predicted_token,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_verify_tokens(
+        struct skippy_session * session,
+        const llama_token * token_ids,
+        size_t token_count,
+        llama_token * output_tokens,
+        size_t output_token_capacity,
+        size_t * out_token_count,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_prefill_chunk_frame(
