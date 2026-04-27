@@ -786,7 +786,7 @@ static bool skippy_sampling_enabled(const skippy_sampling_config * sampling) {
     if (sampling == nullptr || sampling->version == 0 || sampling->flags == 0) {
         return false;
     }
-    return sampling->temperature > 0.0f;
+    return true;
 }
 
 static llama_token skippy_sample_token(
@@ -813,6 +813,16 @@ static llama_token skippy_sample_token(
                         sampling->frequency_penalty,
                         sampling->presence_penalty));
     }
+    const uint32_t logit_bias_count = std::min<uint32_t>(sampling->logit_bias_count, SKIPPY_MAX_LOGIT_BIAS);
+    if (logit_bias_count > 0) {
+        const llama_vocab * vocab = llama_model_get_vocab(session->stage_model->model);
+        llama_sampler_chain_add(
+                sampler,
+                llama_sampler_init_logit_bias(
+                        llama_vocab_n_tokens(vocab),
+                        static_cast<int32_t>(logit_bias_count),
+                        sampling->logit_bias));
+    }
     if (sampling->top_k > 0) {
         llama_sampler_chain_add(sampler, llama_sampler_init_top_k(sampling->top_k));
     }
@@ -822,8 +832,12 @@ static llama_token skippy_sample_token(
     if (sampling->temperature != 1.0f) {
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(sampling->temperature));
     }
-    const uint32_t seed = sampling->seed == 0 ? LLAMA_DEFAULT_SEED : sampling->seed + static_cast<uint32_t>(session->n_past);
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+    if (sampling->temperature <= 0.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+    } else {
+        const uint32_t seed = sampling->seed == 0 ? LLAMA_DEFAULT_SEED : sampling->seed + static_cast<uint32_t>(session->n_past);
+        llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+    }
 
     for (const llama_token token : session->token_history) {
         llama_sampler_accept(sampler, token);

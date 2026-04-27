@@ -26,7 +26,9 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 6
+#define SKIPPY_ABI_VERSION_PATCH 7
+
+#define SKIPPY_MAX_LOGIT_BIAS 256
 
 enum skippy_feature {
     SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
@@ -44,6 +46,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_SAMPLING_CONFIG        = 1 << 12,
     SKIPPY_FEATURE_BATCH_VERIFY_FRAME     = 1 << 13,
     SKIPPY_FEATURE_RECURRENT_STATE        = 1 << 14,
+    SKIPPY_FEATURE_LOGIT_BIAS             = 1 << 15,
 };
 
 enum skippy_kv_page_flag {
@@ -147,6 +150,9 @@ struct skippy_sampling_config {
     float presence_penalty;
     float frequency_penalty;
     float repeat_penalty;
+    uint32_t logit_bias_count;
+    uint32_t reserved;
+    llama_logit_bias logit_bias[SKIPPY_MAX_LOGIT_BIAS];
 };
 
 struct skippy_kv_page_desc {
