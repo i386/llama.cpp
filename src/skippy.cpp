@@ -1511,7 +1511,7 @@ enum skippy_status skippy_verify_tokens_frame(
     if (skippy_is_filtered(session) && session->stage_model->config.layer_start > 0) {
         status = session->stage_model->config.include_output ?
                 skippy_verify_activation_frame(session, input_desc, input_payload, token_count, out_error) :
-                skippy_decode_activation_frame(session, input_desc, input_payload, token_count, false, out_error);
+                skippy_decode_activation_frame(session, input_desc, input_payload, token_ids, token_count, false, out_error);
     } else {
         status = session->stage_model->config.include_output ?
                 skippy_verify_token_batch(session, token_ids, token_count, out_error) :
