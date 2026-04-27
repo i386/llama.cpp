@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 9
+#define SKIPPY_ABI_VERSION_PATCH 10
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -418,6 +418,8 @@ LLAMA_API enum skippy_status skippy_apply_chat_template(
         const struct llama_chat_message * messages,
         size_t message_count,
         bool add_assistant,
+        bool override_enable_thinking,
+        bool enable_thinking,
         char * output_text,
         size_t output_text_capacity,
         size_t * out_text_bytes,

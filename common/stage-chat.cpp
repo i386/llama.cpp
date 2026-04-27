@@ -50,6 +50,8 @@ enum skippy_status skippy_apply_chat_template(
         const struct llama_chat_message * messages,
         size_t message_count,
         bool add_assistant,
+        bool override_enable_thinking,
+        bool enable_thinking,
         char * output_text,
         size_t output_text_capacity,
         size_t * out_text_bytes,
@@ -79,6 +81,19 @@ enum skippy_status skippy_apply_chat_template(
     common_chat_templates_inputs inputs;
     inputs.add_generation_prompt = add_assistant;
     inputs.use_jinja             = true;
+    if (override_enable_thinking) {
+        const char * value = enable_thinking ? "true" : "false";
+        inputs.enable_thinking = enable_thinking;
+        inputs.chat_template_kwargs["enable_thinking"] = value;
+        inputs.chat_template_kwargs["enableThinking"] = value;
+        inputs.chat_template_kwargs["enable_reasoning"] = value;
+        inputs.chat_template_kwargs["use_reasoning"] = value;
+        inputs.chat_template_kwargs["reasoning_enabled"] = value;
+        inputs.chat_template_kwargs["use_thinking"] = value;
+        inputs.chat_template_kwargs["thinking_enabled"] = value;
+        inputs.chat_template_kwargs["enable_think"] = value;
+        inputs.chat_template_kwargs["think_enabled"] = value;
+    }
     inputs.messages.reserve(message_count);
 
     for (size_t i = 0; i < message_count; ++i) {
