@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 2
+#define SKIPPY_ABI_VERSION_PATCH 4
 
 enum skippy_feature {
     SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
@@ -41,6 +41,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_SESSION_RESET          = 1 << 9,
     SKIPPY_FEATURE_BATCH_VERIFY           = 1 << 10,
     SKIPPY_FEATURE_CHAT_TEMPLATE          = 1 << 11,
+    SKIPPY_FEATURE_SAMPLING_CONFIG        = 1 << 12,
 };
 
 enum skippy_kv_page_flag {
@@ -133,6 +134,19 @@ struct skippy_activation_desc {
     uint64_t flags;
 };
 
+struct skippy_sampling_config {
+    uint32_t version;
+    uint32_t flags;
+    uint32_t seed;
+    int32_t top_k;
+    int32_t penalty_last_n;
+    float temperature;
+    float top_p;
+    float presence_penalty;
+    float frequency_penalty;
+    float repeat_penalty;
+};
+
 struct skippy_kv_page_desc {
     uint32_t version;
     int32_t layer_start;
@@ -217,6 +231,18 @@ LLAMA_API enum skippy_status skippy_verify_tokens(
         size_t * out_token_count,
         struct skippy_error ** out_error);
 
+LLAMA_API enum skippy_status skippy_decode_step_sampled(
+        struct skippy_session * session,
+        llama_token token_id,
+        const struct skippy_sampling_config * sampling,
+        const void * input_activation,
+        size_t input_activation_bytes,
+        void * output_activation,
+        size_t output_activation_capacity,
+        size_t * out_output_activation_bytes,
+        llama_token * out_predicted_token,
+        struct skippy_error ** out_error);
+
 LLAMA_API enum skippy_status skippy_prefill_chunk_frame(
         struct skippy_session * session,
         const llama_token * token_ids,
@@ -232,6 +258,19 @@ LLAMA_API enum skippy_status skippy_prefill_chunk_frame(
 LLAMA_API enum skippy_status skippy_decode_step_frame(
         struct skippy_session * session,
         llama_token token_id,
+        const struct skippy_activation_desc * input_desc,
+        const void * input_payload,
+        struct skippy_activation_desc * output_desc,
+        void * output_payload,
+        size_t output_payload_capacity,
+        size_t * out_output_payload_bytes,
+        llama_token * out_predicted_token,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_decode_step_frame_sampled(
+        struct skippy_session * session,
+        llama_token token_id,
+        const struct skippy_sampling_config * sampling,
         const struct skippy_activation_desc * input_desc,
         const void * input_payload,
         struct skippy_activation_desc * output_desc,
