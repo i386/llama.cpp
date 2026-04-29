@@ -502,6 +502,13 @@ extern "C" {
                                  size_t    n_paths,
               struct llama_model_params    params);
 
+    // Load a model from multiple GGUF parts without requiring native split metadata.
+    // The first path provides model metadata; tensors are resolved from all paths in order.
+    LLAMA_API struct llama_model * llama_model_load_from_parts(
+                       const char * const * paths,
+                                 size_t    n_paths,
+              struct llama_model_params    params);
+
     LLAMA_API void llama_model_save_to_file(
             const struct llama_model * model,
                         const char * path_model);

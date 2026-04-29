@@ -525,6 +525,7 @@ llama_model_loader::llama_model_loader(
         void * set_tensor_data_ud,
         const std::string & fname,
         std::vector<std::string> & splits,
+        bool ordered_parts,
         FILE * file,
         bool use_mmap,
         bool use_direct_io,
@@ -593,11 +594,50 @@ llama_model_loader::llama_model_loader(
             n_bytes    += ggml_nbytes(cur);
             weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
         }
+
+        if (ordered_parts) {
+            if (splits.empty() || splits.front() != fname) {
+                throw std::runtime_error(format("ordered GGUF parts must include the primary file as the first path"));
+            }
+            if (splits.size() > UINT16_MAX) {
+                throw std::runtime_error(format("too many ordered GGUF parts: %zu", splits.size()));
+            }
+
+            for (size_t part_idx = 1; part_idx < splits.size(); ++part_idx) {
+                const char * fname_part = splits[part_idx].c_str();
+
+                struct gguf_init_params part_params = {
+                    /*.no_alloc = */ true,
+                    /*.ctx      = */ &ctx,
+                };
+                gguf_context_ptr ctx_gguf { gguf_init_from_file(fname_part, part_params) };
+                if (!ctx_gguf) {
+                    throw std::runtime_error(format("%s: failed to load GGUF part from %s", __func__, fname_part));
+                }
+
+                files.emplace_back(new llama_file(fname_part, "rb", use_direct_io));
+                contexts.emplace_back(ctx);
+
+                for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+                    std::string tensor_name = std::string(cur->name);
+                    if (weights_map.find(tensor_name) != weights_map.end()) {
+                        continue;
+                    }
+                    n_elements += ggml_nelements(cur);
+                    n_bytes    += ggml_nbytes(cur);
+                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), part_idx, ctx_gguf.get(), cur));
+                }
+            }
+
+            if (trace > 0) {
+                LLAMA_LOG_INFO("%s: loaded %zu ordered GGUF parts\n", __func__, splits.size());
+            }
+        }
         uint16_t n_split = 0;
         get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
 
         // Load additional GGML contexts
-        if (n_split > 1) {
+        if (!ordered_parts && n_split > 1) {
             // make sure the main file is loaded first
             uint16_t idx = 0;
             const std::string kv_split_no = llm_kv(LLM_KV_SPLIT_NO);

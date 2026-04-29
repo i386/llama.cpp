@@ -1005,7 +1005,8 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_RECURRENT_STATE |
            SKIPPY_FEATURE_LOGIT_BIAS |
            SKIPPY_FEATURE_SESSION_TRIM |
-           SKIPPY_FEATURE_SESSION_CHECKPOINT;
+           SKIPPY_FEATURE_SESSION_CHECKPOINT |
+           SKIPPY_FEATURE_PACKAGE_PART_LOAD;
 }
 
 const char * skippy_status_string(enum skippy_status status) {
@@ -1032,47 +1033,11 @@ void skippy_error_free(struct skippy_error * error) {
     delete error;
 }
 
-enum skippy_status skippy_model_open(
-        const char * path,
+static enum skippy_status skippy_finish_model_open(
+        llama_model * model,
         const struct skippy_runtime_config * config,
         struct skippy_model ** out_model,
         struct skippy_error ** out_error) {
-    if (path == nullptr || out_model == nullptr) {
-        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "path and out_model are required");
-        return SKIPPY_STATUS_INVALID_ARGUMENT;
-    }
-
-    *out_model = nullptr;
-
-    if (config != nullptr && config->filter_tensors_on_load && (config->layer_start < 0 || config->layer_start >= config->layer_end)) {
-        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "layer_start must be non-negative and less than layer_end");
-        return SKIPPY_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (!skippy_is_full_model_config(config) && (config == nullptr || !config->filter_tensors_on_load)) {
-        skippy_set_error(
-                out_error,
-                SKIPPY_STATUS_UNSUPPORTED,
-                "runtime tensor filtering is not implemented yet; use a full-model single-stage config");
-        return SKIPPY_STATUS_UNSUPPORTED;
-    }
-
-    llama_model_params params = llama_model_default_params();
-    if (config != nullptr) {
-        params.n_gpu_layers = config->n_gpu_layers;
-        if (config->disable_repack || config->filter_tensors_on_load) {
-            params.use_extra_bufts = false;
-        }
-    }
-
-    llama_backend_init();
-    skippy_filter_scope filter_scope(config);
-    llama_model * model = llama_model_load_from_file(path, params);
-    if (model == nullptr) {
-        skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, "failed to load llama model");
-        return SKIPPY_STATUS_MODEL_ERROR;
-    }
-
     if (config != nullptr && config->filter_tensors_on_load) {
         const int32_t n_layer = llama_model_n_layer(model);
         if (model->arch != LLM_ARCH_LLAMA &&
@@ -1124,6 +1089,101 @@ enum skippy_status skippy_model_open(
 
     *out_model = stage_model;
     return skippy_success(out_error);
+}
+
+enum skippy_status skippy_model_open(
+        const char * path,
+        const struct skippy_runtime_config * config,
+        struct skippy_model ** out_model,
+        struct skippy_error ** out_error) {
+    if (path == nullptr || out_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "path and out_model are required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_model = nullptr;
+
+    if (config != nullptr && config->filter_tensors_on_load && (config->layer_start < 0 || config->layer_start >= config->layer_end)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "layer_start must be non-negative and less than layer_end");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!skippy_is_full_model_config(config) && (config == nullptr || !config->filter_tensors_on_load)) {
+        skippy_set_error(
+                out_error,
+                SKIPPY_STATUS_UNSUPPORTED,
+                "runtime tensor filtering is not implemented yet; use a full-model single-stage config");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+
+    llama_model_params params = llama_model_default_params();
+    if (config != nullptr) {
+        params.n_gpu_layers = config->n_gpu_layers;
+        if (config->disable_repack || config->filter_tensors_on_load) {
+            params.use_extra_bufts = false;
+        }
+    }
+
+    llama_backend_init();
+    skippy_filter_scope filter_scope(config);
+    llama_model * model = llama_model_load_from_file(path, params);
+    if (model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, "failed to load llama model");
+        return SKIPPY_STATUS_MODEL_ERROR;
+    }
+
+    return skippy_finish_model_open(model, config, out_model, out_error);
+}
+
+enum skippy_status skippy_model_open_from_parts(
+        const char * const * paths,
+        size_t path_count,
+        const struct skippy_runtime_config * config,
+        struct skippy_model ** out_model,
+        struct skippy_error ** out_error) {
+    if (paths == nullptr || path_count == 0 || out_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "paths, path_count, and out_model are required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    for (size_t i = 0; i < path_count; ++i) {
+        if (paths[i] == nullptr) {
+            skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "package part path is null");
+            return SKIPPY_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    *out_model = nullptr;
+
+    if (config != nullptr && config->filter_tensors_on_load && (config->layer_start < 0 || config->layer_start >= config->layer_end)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "layer_start must be non-negative and less than layer_end");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!skippy_is_full_model_config(config) && (config == nullptr || !config->filter_tensors_on_load)) {
+        skippy_set_error(
+                out_error,
+                SKIPPY_STATUS_UNSUPPORTED,
+                "runtime tensor filtering is not implemented yet; use a full-model single-stage config");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+
+    llama_model_params params = llama_model_default_params();
+    if (config != nullptr) {
+        params.n_gpu_layers = config->n_gpu_layers;
+        if (config->disable_repack || config->filter_tensors_on_load) {
+            params.use_extra_bufts = false;
+        }
+    }
+
+    llama_backend_init();
+    skippy_filter_scope filter_scope(config);
+    llama_model * model = llama_model_load_from_parts(paths, path_count, params);
+    if (model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, "failed to load llama model from GGUF parts");
+        return SKIPPY_STATUS_MODEL_ERROR;
+    }
+
+    return skippy_finish_model_open(model, config, out_model, out_error);
 }
 
 enum skippy_status skippy_model_free(
