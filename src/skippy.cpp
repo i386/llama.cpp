@@ -1210,6 +1210,8 @@ enum skippy_status skippy_session_create(
     llama_context_params params = llama_context_default_params();
     params.n_ctx = model->config.ctx_size > 0 ? static_cast<uint32_t>(model->config.ctx_size) : 512;
     params.n_batch = params.n_ctx;
+    params.type_k = model->config.cache_type_k > 0 ? static_cast<ggml_type>(model->config.cache_type_k) : GGML_TYPE_F16;
+    params.type_v = model->config.cache_type_v > 0 ? static_cast<ggml_type>(model->config.cache_type_v) : GGML_TYPE_F16;
     params.embeddings = model->config.filter_tensors_on_load && !model->config.include_output;
     if (llm_arch_is_recurrent(model->model->arch) || llm_arch_is_hybrid(model->model->arch)) {
         params.n_seq_max = 2;
