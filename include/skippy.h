@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 13
+#define SKIPPY_ABI_VERSION_PATCH 14
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -51,6 +51,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_SESSION_CHECKPOINT     = 1 << 17,
     SKIPPY_FEATURE_PACKAGE_PART_LOAD      = 1 << 18,
     SKIPPY_FEATURE_GENERATION_SIGNALS     = 1 << 19,
+    SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL = 1 << 20,
 };
 
 enum skippy_kv_page_flag {
@@ -213,9 +214,32 @@ LLAMA_API enum skippy_status skippy_model_free(
         struct skippy_model * model,
         struct skippy_error ** out_error);
 
+LLAMA_API const struct llama_model * skippy_model_llama_model(
+        const struct skippy_model * model);
+
 LLAMA_API enum skippy_status skippy_session_create(
         struct skippy_model * model,
         struct skippy_session ** out_session,
+        struct skippy_error ** out_error);
+
+LLAMA_API struct llama_context * skippy_session_llama_context(
+        struct skippy_session * session);
+
+LLAMA_API int32_t skippy_session_position(
+        const struct skippy_session * session);
+
+LLAMA_API int32_t skippy_session_batch_size(
+        const struct skippy_session * session);
+
+LLAMA_API enum skippy_status skippy_session_set_position(
+        struct skippy_session * session,
+        int32_t n_past,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_sample_current(
+        struct skippy_session * session,
+        const struct skippy_sampling_config * sampling,
+        llama_token * out_predicted_token,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_session_reset(
@@ -329,6 +353,15 @@ LLAMA_API enum skippy_status skippy_verify_tokens_frame(
         llama_token * output_tokens,
         size_t output_token_capacity,
         size_t * out_token_count,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_copy_output_activation_frame(
+        struct skippy_session * session,
+        size_t token_count,
+        struct skippy_activation_desc * output_desc,
+        void * output_payload,
+        size_t output_payload_capacity,
+        size_t * out_output_payload_bytes,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_export_state(

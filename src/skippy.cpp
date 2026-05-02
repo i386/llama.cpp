@@ -1126,7 +1126,8 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_SESSION_TRIM |
            SKIPPY_FEATURE_SESSION_CHECKPOINT |
            SKIPPY_FEATURE_PACKAGE_PART_LOAD |
-           SKIPPY_FEATURE_GENERATION_SIGNALS;
+           SKIPPY_FEATURE_GENERATION_SIGNALS |
+           SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL;
 }
 
 const char * skippy_status_string(enum skippy_status status) {
@@ -1333,6 +1334,11 @@ enum skippy_status skippy_model_free(
     return skippy_success(out_error);
 }
 
+const struct llama_model * skippy_model_llama_model(
+        const struct skippy_model * model) {
+    return model != nullptr ? model->model : nullptr;
+}
+
 enum skippy_status skippy_session_create(
         struct skippy_model * model,
         struct skippy_session ** out_session,
@@ -1368,6 +1374,56 @@ enum skippy_status skippy_session_create(
     session->checkpoint_valid = false;
     session->checkpoint_n_past = 0;
     *out_session = session;
+    return skippy_success(out_error);
+}
+
+struct llama_context * skippy_session_llama_context(
+        struct skippy_session * session) {
+    return session != nullptr ? session->ctx : nullptr;
+}
+
+int32_t skippy_session_position(
+        const struct skippy_session * session) {
+    return session != nullptr ? session->n_past : -1;
+}
+
+int32_t skippy_session_batch_size(
+        const struct skippy_session * session) {
+    return session != nullptr && session->ctx != nullptr ? llama_n_batch(session->ctx) : 0;
+}
+
+enum skippy_status skippy_session_set_position(
+        struct skippy_session * session,
+        int32_t n_past,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (n_past < 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "n_past must be non-negative");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    session->n_past = n_past;
+    if (session->token_history.size() > static_cast<size_t>(n_past)) {
+        session->token_history.resize(static_cast<size_t>(n_past));
+    }
+    if (session->signal_history.size() > static_cast<size_t>(n_past)) {
+        session->signal_history.resize(static_cast<size_t>(n_past));
+    }
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_session_sample_current(
+        struct skippy_session * session,
+        const struct skippy_sampling_config * sampling,
+        llama_token * out_predicted_token,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr || out_predicted_token == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session and out_predicted_token are required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    *out_predicted_token = skippy_sample_token(session, sampling);
     return skippy_success(out_error);
 }
 
@@ -1815,6 +1871,32 @@ enum skippy_status skippy_verify_tokens_frame(
     }
 
     return skippy_success(out_error);
+}
+
+enum skippy_status skippy_session_copy_output_activation_frame(
+        struct skippy_session * session,
+        size_t token_count,
+        struct skippy_activation_desc * output_desc,
+        void * output_payload,
+        size_t output_payload_capacity,
+        size_t * out_output_payload_bytes,
+        struct skippy_error ** out_error) {
+    if (token_count == 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "token_count must be greater than zero");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    enum skippy_status status = skippy_prepare_output_activation_frame(
+            session,
+            token_count,
+            output_payload,
+            output_payload_capacity,
+            out_output_payload_bytes,
+            output_desc,
+            out_error);
+    if (status != SKIPPY_STATUS_OK) {
+        return status;
+    }
+    return skippy_copy_output_activation_frame(session, token_count, output_payload, out_error);
 }
 
 enum skippy_status skippy_export_state(
