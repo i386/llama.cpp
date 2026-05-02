@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 12
+#define SKIPPY_ABI_VERSION_PATCH 13
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -50,6 +50,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_SESSION_TRIM           = 1 << 16,
     SKIPPY_FEATURE_SESSION_CHECKPOINT     = 1 << 17,
     SKIPPY_FEATURE_PACKAGE_PART_LOAD      = 1 << 18,
+    SKIPPY_FEATURE_GENERATION_SIGNALS     = 1 << 19,
 };
 
 enum skippy_kv_page_flag {
