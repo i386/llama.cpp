@@ -121,6 +121,11 @@ struct skippy_runtime_config {
     bool filter_tensors_on_load;
     bool include_embeddings;
     bool include_output;
+
+    // Optional ggml backend device name, for example "CUDA0", "MTL0",
+    // "Vulkan1", or "CPU". When set, skippy loads the model only on that
+    // backend device instead of relying on llama.cpp default device ordering.
+    const char * selected_backend_device;
 };
 
 struct skippy_tensor_info {
