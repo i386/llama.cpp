@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 17
+#define SKIPPY_ABI_VERSION_PATCH 18
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -50,6 +50,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_GENERATION_SIGNALS     = 1 << 19,
     SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL = 1 << 20,
     SKIPPY_FEATURE_CHAT_TEMPLATE_TOOLS    = 1 << 21,
+    SKIPPY_FEATURE_CHAT_SAMPLING_GRAMMAR  = 1 << 22,
 };
 
 enum skippy_status {
@@ -222,6 +223,13 @@ LLAMA_API enum skippy_status skippy_session_sample_current(
         struct skippy_session * session,
         const struct skippy_sampling_config * sampling,
         llama_token * out_predicted_token,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_configure_chat_sampling(
+        struct skippy_session * session,
+        const struct skippy_sampling_config * sampling,
+        const char * metadata_json,
+        uint64_t prompt_token_count,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_session_reset(
