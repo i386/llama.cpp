@@ -1345,13 +1345,16 @@ uint64_t skippy_abi_features(void) {
     return SKIPPY_FEATURE_RUNTIME_SLICE |
            SKIPPY_FEATURE_MODEL_INTROSPECTION |
            SKIPPY_FEATURE_GGUF_SLICE_WRITE |
+           SKIPPY_FEATURE_STATE_IMPORT_EXPORT |
            SKIPPY_FEATURE_TOKENIZE_DETOKENIZE |
            SKIPPY_FEATURE_ACTIVATION_FRAME |
+           SKIPPY_FEATURE_NATIVE_KV_PAGE |
            SKIPPY_FEATURE_SESSION_RESET |
            SKIPPY_FEATURE_BATCH_VERIFY |
            SKIPPY_FEATURE_CHAT_TEMPLATE |
            SKIPPY_FEATURE_SAMPLING_CONFIG |
            SKIPPY_FEATURE_BATCH_VERIFY_FRAME |
+           SKIPPY_FEATURE_RECURRENT_STATE |
            SKIPPY_FEATURE_LOGIT_BIAS |
            SKIPPY_FEATURE_SESSION_TRIM |
            SKIPPY_FEATURE_SESSION_CHECKPOINT |
@@ -2211,6 +2214,212 @@ enum skippy_status skippy_session_copy_output_activation_frame(
     return skippy_copy_output_activation_frame(session, token_count, output_payload, out_error);
 }
 
+static enum skippy_status skippy_validate_state_range(
+        skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr || session->stage_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    const skippy_runtime_config & config = session->stage_model->config;
+    const int32_t expected_layer_start = config.filter_tensors_on_load ? config.layer_start : 0;
+    const int32_t expected_layer_end = config.filter_tensors_on_load ?
+            config.layer_end : llama_model_n_layer(session->stage_model->model);
+    if (layer_start != expected_layer_start || layer_end != expected_layer_end) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state range must match the session layer range");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    return SKIPPY_STATUS_OK;
+}
+
+static void skippy_update_session_state_after_import(
+        skippy_session * session,
+        uint32_t imported_cells) {
+    session->n_past = std::max<int32_t>(
+            session->n_past,
+            static_cast<int32_t>(std::min<uint32_t>(
+                    imported_cells,
+                    static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))));
+    if (session->token_history.size() > static_cast<size_t>(session->n_past)) {
+        session->token_history.resize(static_cast<size_t>(session->n_past));
+    }
+    if (session->signal_history.size() > static_cast<size_t>(session->n_past)) {
+        session->signal_history.resize(static_cast<size_t>(session->n_past));
+    }
+    session->checkpoint_valid = false;
+}
+
+enum skippy_status skippy_export_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    if (out_bytes != nullptr) {
+        *out_bytes = 0;
+    }
+    enum skippy_status status = skippy_validate_state_range(session, layer_start, layer_end, out_error);
+    if (status != SKIPPY_STATUS_OK) {
+        return status;
+    }
+
+    session->ctx->synchronize();
+    const size_t required = llama_state_seq_get_size_ext(
+            session->ctx,
+            session->seq_id,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (out_bytes != nullptr) {
+        *out_bytes = required;
+    }
+    if (required == 0) {
+        return skippy_success(out_error);
+    }
+    if (output == nullptr || output_capacity < required) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "state output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const size_t written = llama_state_seq_get_data_ext(
+            session->ctx,
+            static_cast<uint8_t *>(output),
+            output_capacity,
+            session->seq_id,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (written != required) {
+        if (out_bytes != nullptr) {
+            *out_bytes = written;
+        }
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to export sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    enum skippy_status status = skippy_validate_state_range(session, layer_start, layer_end, out_error);
+    if (status != SKIPPY_STATUS_OK) {
+        return status;
+    }
+    if (input == nullptr && input_bytes > 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state input is required when input_bytes is non-zero");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t imported_cells = 0;
+    if (input_bytes >= sizeof(imported_cells)) {
+        std::memcpy(&imported_cells, input, sizeof(imported_cells));
+    }
+
+    session->ctx->synchronize();
+    const size_t read = llama_state_seq_set_data_ext(
+            session->ctx,
+            static_cast<const uint8_t *>(input),
+            input_bytes,
+            session->seq_id,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (read != input_bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    skippy_update_session_state_after_import(session, imported_cells);
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_export_full_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    if (out_bytes != nullptr) {
+        *out_bytes = 0;
+    }
+    enum skippy_status status = skippy_validate_state_range(session, layer_start, layer_end, out_error);
+    if (status != SKIPPY_STATUS_OK) {
+        return status;
+    }
+
+    session->ctx->synchronize();
+    const size_t required = llama_state_seq_get_size(session->ctx, session->seq_id);
+    if (out_bytes != nullptr) {
+        *out_bytes = required;
+    }
+    if (required == 0) {
+        return skippy_success(out_error);
+    }
+    if (output == nullptr || output_capacity < required) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "full state output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const size_t written = llama_state_seq_get_data(
+            session->ctx,
+            static_cast<uint8_t *>(output),
+            output_capacity,
+            session->seq_id);
+    if (written != required) {
+        if (out_bytes != nullptr) {
+            *out_bytes = written;
+        }
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to export full sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_full_state(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    enum skippy_status status = skippy_validate_state_range(session, layer_start, layer_end, out_error);
+    if (status != SKIPPY_STATUS_OK) {
+        return status;
+    }
+    if (input == nullptr && input_bytes > 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state input is required when input_bytes is non-zero");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t imported_cells = 0;
+    if (input_bytes >= 2 * sizeof(uint32_t)) {
+        std::memcpy(&imported_cells, static_cast<const uint8_t *>(input) + sizeof(uint32_t), sizeof(imported_cells));
+    }
+
+    session->ctx->synchronize();
+    const size_t read = llama_state_seq_set_data(
+            session->ctx,
+            static_cast<const uint8_t *>(input),
+            input_bytes,
+            session->seq_id);
+    if (read != input_bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import full sequence state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    skippy_update_session_state_after_import(session, imported_cells);
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
+}
+
 static llama_memory_recurrent * skippy_get_recurrent_memory(
         skippy_session * session,
         skippy_error ** out_error) {
@@ -2236,6 +2445,207 @@ static llama_memory_recurrent * skippy_get_recurrent_memory(
     }
 
     return nullptr;
+}
+
+enum skippy_status skippy_export_recurrent_state(
+        struct skippy_session * session,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    if (out_bytes == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "out_bytes is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    *out_bytes = 0;
+    skippy_error * recurrent_error = nullptr;
+    llama_memory_recurrent * recurrent = skippy_get_recurrent_memory(session, &recurrent_error);
+    if (recurrent_error != nullptr) {
+        if (out_error != nullptr) {
+            *out_error = recurrent_error;
+        } else {
+            skippy_error_free(recurrent_error);
+        }
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    if (recurrent == nullptr) {
+        return skippy_success(out_error);
+    }
+
+    session->ctx->synchronize();
+    const size_t bytes = llama_state_seq_get_size_ext(
+            session->ctx,
+            session->seq_id,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    *out_bytes = bytes;
+    if (bytes == 0) {
+        return skippy_success(out_error);
+    }
+    if (output == nullptr || output_capacity < bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "recurrent state output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const size_t written = llama_state_seq_get_data_ext(
+            session->ctx,
+            static_cast<uint8_t *>(output),
+            output_capacity,
+            session->seq_id,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (written != bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to export recurrent state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_recurrent_state(
+        struct skippy_session * session,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    if (input_bytes == 0) {
+        return skippy_success(out_error);
+    }
+    if (input == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "recurrent state input is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    skippy_error * recurrent_error = nullptr;
+    llama_memory_recurrent * recurrent = skippy_get_recurrent_memory(session, &recurrent_error);
+    if (recurrent_error != nullptr) {
+        if (out_error != nullptr) {
+            *out_error = recurrent_error;
+        } else {
+            skippy_error_free(recurrent_error);
+        }
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    if (recurrent == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime has no recurrent memory");
+        return SKIPPY_STATUS_UNSUPPORTED;
+    }
+
+    session->ctx->synchronize();
+    const size_t read = llama_state_seq_set_data_ext(
+            session->ctx,
+            static_cast<const uint8_t *>(input),
+            input_bytes,
+            session->seq_id,
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (read != input_bytes) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "failed to import recurrent state");
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
+}
+
+static llama_kv_cache * skippy_get_kv_cache(
+        skippy_session * session,
+        skippy_error ** out_error) {
+    if (session == nullptr || session->ctx == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return nullptr;
+    }
+
+    llama_memory_t memory = session->ctx->get_memory();
+    if (memory == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "runtime memory is unavailable");
+        return nullptr;
+    }
+
+    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory)) {
+        llama_kv_cache * kv = hybrid->get_mem_attn();
+        if (kv == nullptr) {
+            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime has no attention KV cache");
+        }
+        return kv;
+    }
+    if (auto * kv = dynamic_cast<llama_kv_cache *>(memory)) {
+        return kv;
+    }
+
+    skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime memory type is not supported for native KV pages");
+    return nullptr;
+}
+
+enum skippy_status skippy_export_kv_page(
+        struct skippy_session * session,
+        int32_t layer_start,
+        int32_t layer_end,
+        uint64_t token_start,
+        uint64_t token_count,
+        struct skippy_kv_page_desc * out_desc,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        struct skippy_error ** out_error) {
+    llama_kv_cache * kv = skippy_get_kv_cache(session, out_error);
+    if (kv == nullptr) {
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->ctx->synchronize();
+
+    std::string error;
+    const bool ok = kv->stage_export_kv_page(
+            session->seq_id,
+            layer_start,
+            layer_end,
+            token_start,
+            token_count,
+            out_desc,
+            output,
+            output_capacity,
+            out_bytes,
+            error);
+    if (!ok) {
+        const bool too_small = out_bytes != nullptr && *out_bytes > output_capacity;
+        const enum skippy_status status = too_small ? SKIPPY_STATUS_BUFFER_TOO_SMALL : SKIPPY_STATUS_RUNTIME_ERROR;
+        skippy_set_error(out_error, status, error.c_str());
+        return status;
+    }
+    if (output == nullptr || (out_bytes != nullptr && *out_bytes > output_capacity)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "native KV page output buffer is too small");
+        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_import_kv_page(
+        struct skippy_session * session,
+        const struct skippy_kv_page_desc * desc,
+        const void * input,
+        size_t input_bytes,
+        struct skippy_error ** out_error) {
+    if (desc == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "native KV page descriptor is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    llama_kv_cache * kv = skippy_get_kv_cache(session, out_error);
+    if (kv == nullptr) {
+        return out_error != nullptr && *out_error != nullptr ? (*out_error)->status : SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+
+    std::string error;
+    if (!kv->stage_import_kv_page(session->seq_id, *desc, input, input_bytes, error)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, error.c_str());
+        return SKIPPY_STATUS_RUNTIME_ERROR;
+    }
+    session->n_past = std::max<int32_t>(
+            session->n_past,
+            static_cast<int32_t>(std::min<uint64_t>(
+                    desc->token_start + desc->token_count,
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))));
+    session->ctx->synchronize();
+
+    return skippy_success(out_error);
 }
 
 enum skippy_status skippy_trim_session(

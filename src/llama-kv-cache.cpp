@@ -1221,6 +1221,363 @@ ggml_type llama_kv_cache::type_v() const {
     return layers[0].v->type;
 }
 
+bool llama_kv_cache::stage_export_kv_page(
+        llama_seq_id seq_id,
+        int32_t layer_start,
+        int32_t layer_end,
+        uint64_t token_start,
+        uint64_t token_count,
+        skippy_kv_page_desc * out_desc,
+        void * output,
+        size_t output_capacity,
+        size_t * out_bytes,
+        std::string & error) const {
+    if (out_desc == nullptr || out_bytes == nullptr) {
+        error = "out_desc and out_bytes are required";
+        return false;
+    }
+    if (layer_start < 0 || layer_end <= layer_start) {
+        error = "invalid layer range";
+        return false;
+    }
+    if (token_count == 0) {
+        error = "token_count must be greater than zero";
+        return false;
+    }
+    if (token_start > static_cast<uint64_t>(std::numeric_limits<llama_pos>::max()) ||
+            token_count > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
+            token_start + token_count < token_start ||
+            token_start + token_count > static_cast<uint64_t>(std::numeric_limits<llama_pos>::max())) {
+        error = "token range is too large";
+        return false;
+    }
+    if (seq_to_stream.empty() || v_cells.empty()) {
+        error = "KV cache has no stream";
+        return false;
+    }
+    if (seq_id < 0 || static_cast<size_t>(seq_id) >= seq_to_stream.size()) {
+        error = "sequence id is mapped to an invalid KV stream";
+        return false;
+    }
+
+    const uint32_t strm = seq_to_stream[seq_id];
+    if (strm >= v_cells.size()) {
+        error = "sequence id is mapped to an invalid KV stream";
+        return false;
+    }
+    const auto & cells = v_cells[strm];
+
+    std::vector<uint32_t> cell_idxs(static_cast<size_t>(token_count), std::numeric_limits<uint32_t>::max());
+    uint32_t found_cells = 0;
+    const llama_pos pos_start = static_cast<llama_pos>(token_start);
+    const llama_pos pos_end = static_cast<llama_pos>(token_start + token_count);
+    for (uint32_t i = 0; i < cells.size() && found_cells < token_count; ++i) {
+        if (!cells.seq_has(i, seq_id) || !cells.pos_in(i, pos_start, pos_end)) {
+            continue;
+        }
+        const size_t token_index = static_cast<size_t>(cells.pos_get(i) - pos_start);
+        if (token_index < cell_idxs.size() && cell_idxs[token_index] == std::numeric_limits<uint32_t>::max()) {
+            cell_idxs[token_index] = i;
+            ++found_cells;
+        }
+    }
+    if (found_cells != token_count) {
+        error = "requested token position is not present in the KV cache";
+        return false;
+    }
+
+    std::vector<const kv_layer *> selected;
+    selected.reserve(layers.size());
+    uint32_t k_row_bytes = 0;
+    uint32_t v_row_bytes = 0;
+    uint32_t v_element_bytes = 0;
+    uint32_t k_type = GGML_TYPE_COUNT;
+    uint32_t v_type = GGML_TYPE_COUNT;
+    uint64_t payload_bytes = 0;
+
+    for (const auto & layer : layers) {
+        const uint32_t il = layer.il;
+        if (il < static_cast<uint32_t>(layer_start) || il >= static_cast<uint32_t>(layer_end)) {
+            continue;
+        }
+        if (layer.k_stream.size() <= strm || layer.v_stream.size() <= strm || layer.k_stream[strm] == nullptr || layer.v_stream[strm] == nullptr) {
+            error = "KV layer stream is unavailable";
+            return false;
+        }
+
+        const size_t k_row = ggml_row_size(layer.k_stream[strm]->type, hparams.n_embd_k_gqa(il));
+        const size_t v_row = !v_trans ? ggml_row_size(layer.v_stream[strm]->type, hparams.n_embd_v_gqa(il)) : 0;
+        const size_t v_el  =  v_trans ? ggml_type_size(layer.v_stream[strm]->type) : 0;
+
+        if (k_row > std::numeric_limits<uint32_t>::max() ||
+                v_row > std::numeric_limits<uint32_t>::max() ||
+                v_el > std::numeric_limits<uint32_t>::max()) {
+            error = "KV row size exceeds descriptor capacity";
+            return false;
+        }
+        if (selected.empty()) {
+            k_row_bytes = static_cast<uint32_t>(k_row);
+            v_row_bytes = static_cast<uint32_t>(v_row);
+            v_element_bytes = static_cast<uint32_t>(v_el);
+            k_type = static_cast<uint32_t>(layer.k_stream[strm]->type);
+            v_type = static_cast<uint32_t>(layer.v_stream[strm]->type);
+        } else if (k_row_bytes != k_row ||
+                v_row_bytes != v_row ||
+                v_element_bytes != v_el ||
+                k_type != static_cast<uint32_t>(layer.k_stream[strm]->type) ||
+                v_type != static_cast<uint32_t>(layer.v_stream[strm]->type)) {
+            error = "native KV page export requires uniform K/V types and row sizes across selected layers";
+            return false;
+        }
+
+        const uint64_t v_bytes = v_trans ?
+            static_cast<uint64_t>(hparams.n_embd_v_gqa(il)) * token_count * v_el :
+            token_count * v_row;
+        const uint64_t k_bytes = token_count * k_row;
+        if (payload_bytes > std::numeric_limits<uint64_t>::max() - k_bytes ||
+                payload_bytes + k_bytes > std::numeric_limits<uint64_t>::max() - v_bytes) {
+            error = "KV page payload is too large";
+            return false;
+        }
+        payload_bytes += k_bytes + v_bytes;
+        selected.push_back(&layer);
+    }
+
+    if (selected.empty()) {
+        error = "no KV cache layers selected by layer range";
+        return false;
+    }
+    if (payload_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        error = "KV page payload exceeds addressable memory";
+        return false;
+    }
+
+    out_desc->version = 1;
+    out_desc->layer_start = layer_start;
+    out_desc->layer_end = layer_end;
+    out_desc->token_start = token_start;
+    out_desc->token_count = token_count;
+    out_desc->layer_count = static_cast<uint32_t>(selected.size());
+    out_desc->k_type = k_type;
+    out_desc->v_type = v_type;
+    out_desc->k_row_bytes = k_row_bytes;
+    out_desc->v_row_bytes = v_row_bytes;
+    out_desc->v_element_bytes = v_element_bytes;
+    out_desc->payload_bytes = payload_bytes;
+    out_desc->flags = v_trans ? SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED : 0;
+    *out_bytes = static_cast<size_t>(payload_bytes);
+
+    if (output == nullptr) {
+        return true;
+    }
+    if (output_capacity < static_cast<size_t>(payload_bytes)) {
+        error = "output buffer is too small";
+        return false;
+    }
+
+    char * dst = static_cast<char *>(output);
+    for (const auto * layer : selected) {
+        auto * k = layer->k_stream[strm];
+        for (uint32_t cell_idx : cell_idxs) {
+            ggml_backend_tensor_get(k, dst, static_cast<size_t>(cell_idx) * k_row_bytes, k_row_bytes);
+            dst += k_row_bytes;
+        }
+    }
+
+    if (!v_trans) {
+        for (const auto * layer : selected) {
+            auto * v = layer->v_stream[strm];
+            for (uint32_t cell_idx : cell_idxs) {
+                ggml_backend_tensor_get(v, dst, static_cast<size_t>(cell_idx) * v_row_bytes, v_row_bytes);
+                dst += v_row_bytes;
+            }
+        }
+    } else {
+        for (const auto * layer : selected) {
+            auto * v = layer->v_stream[strm];
+            const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(layer->il);
+            for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                for (uint32_t cell_idx : cell_idxs) {
+                    const size_t src_offset = (static_cast<size_t>(cell_idx) + static_cast<size_t>(j) * cells.size()) * v_element_bytes;
+                    ggml_backend_tensor_get(v, dst, src_offset, v_element_bytes);
+                    dst += v_element_bytes;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+bool llama_kv_cache::stage_import_kv_page(
+        llama_seq_id seq_id,
+        const skippy_kv_page_desc & desc,
+        const void * input,
+        size_t input_bytes,
+        std::string & error) {
+    if (input == nullptr) {
+        error = "input payload is required";
+        return false;
+    }
+    if (desc.version != 1) {
+        error = "unsupported native KV page descriptor version";
+        return false;
+    }
+    if (desc.layer_start < 0 || desc.layer_end <= desc.layer_start || desc.token_count == 0) {
+        error = "invalid native KV page descriptor";
+        return false;
+    }
+    if (desc.payload_bytes != input_bytes) {
+        error = "native KV page payload size does not match descriptor";
+        return false;
+    }
+    if (desc.token_start > static_cast<uint64_t>(std::numeric_limits<llama_pos>::max()) ||
+            desc.token_count > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
+            desc.token_start + desc.token_count < desc.token_start ||
+            desc.token_start + desc.token_count > static_cast<uint64_t>(std::numeric_limits<llama_pos>::max())) {
+        error = "token range is too large";
+        return false;
+    }
+    if ((desc.flags & SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED) != (v_trans ? SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED : 0)) {
+        error = "native KV page V transposition does not match runtime";
+        return false;
+    }
+    if (seq_to_stream.empty() || v_cells.empty()) {
+        error = "KV cache has no stream";
+        return false;
+    }
+    if (seq_id < 0 || static_cast<size_t>(seq_id) >= seq_to_stream.size() || seq_id >= LLAMA_MAX_SEQ) {
+        error = "sequence id is mapped to an invalid KV stream";
+        return false;
+    }
+
+    const uint32_t strm = seq_to_stream[seq_id];
+    if (strm >= v_cells.size()) {
+        error = "sequence id is mapped to an invalid KV stream";
+        return false;
+    }
+
+    std::vector<const kv_layer *> selected;
+    selected.reserve(layers.size());
+    for (const auto & layer : layers) {
+        const uint32_t il = layer.il;
+        if (il < static_cast<uint32_t>(desc.layer_start) || il >= static_cast<uint32_t>(desc.layer_end)) {
+            continue;
+        }
+        if (layer.k_stream.size() <= strm || layer.v_stream.size() <= strm || layer.k_stream[strm] == nullptr || layer.v_stream[strm] == nullptr) {
+            error = "KV layer stream is unavailable";
+            return false;
+        }
+        const size_t k_row = ggml_row_size(layer.k_stream[strm]->type, hparams.n_embd_k_gqa(il));
+        const size_t v_row = !v_trans ? ggml_row_size(layer.v_stream[strm]->type, hparams.n_embd_v_gqa(il)) : 0;
+        const size_t v_el  =  v_trans ? ggml_type_size(layer.v_stream[strm]->type) : 0;
+        if (desc.k_type != static_cast<uint32_t>(layer.k_stream[strm]->type) ||
+                desc.v_type != static_cast<uint32_t>(layer.v_stream[strm]->type) ||
+                desc.k_row_bytes != k_row ||
+                desc.v_row_bytes != v_row ||
+                desc.v_element_bytes != v_el) {
+            error = "native KV page descriptor does not match runtime KV cache layout";
+            return false;
+        }
+        selected.push_back(&layer);
+    }
+    if (selected.size() != desc.layer_count) {
+        error = "native KV page layer count does not match runtime";
+        return false;
+    }
+
+    uint64_t expected_bytes = 0;
+    for (const auto * layer : selected) {
+        expected_bytes += desc.token_count * desc.k_row_bytes;
+        expected_bytes += v_trans ?
+            static_cast<uint64_t>(hparams.n_embd_v_gqa(layer->il)) * desc.token_count * desc.v_element_bytes :
+            desc.token_count * desc.v_row_bytes;
+    }
+    if (expected_bytes != desc.payload_bytes) {
+        error = "native KV page descriptor payload size is inconsistent";
+        return false;
+    }
+
+    llama_ubatch ubatch = {};
+    auto udata = std::make_shared<llama_ubatch::data_t>();
+    const uint32_t n_tokens = static_cast<uint32_t>(desc.token_count);
+    const uint32_t n_pos = hparams.n_pos_per_embd();
+    udata->token.resize(n_tokens);
+    udata->pos.resize(static_cast<size_t>(n_tokens) * n_pos);
+    udata->n_seq_id.resize(n_tokens, 1);
+    udata->seq_id.resize(n_tokens);
+    udata->seq_id_unq = { seq_id };
+    udata->seq_idx.resize(LLAMA_MAX_SEQ, -1);
+    udata->seq_idx[seq_id] = 0;
+    udata->output.resize(n_tokens, 0);
+    udata->seq_id_data.resize(n_tokens, 0);
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        const llama_pos pos = static_cast<llama_pos>(desc.token_start + i);
+        for (uint32_t j = 0; j < n_pos; ++j) {
+            udata->pos[static_cast<size_t>(j) * n_tokens + i] = pos;
+        }
+        udata->seq_id_data[i] = seq_id;
+        udata->seq_id[i] = &udata->seq_id_data[i];
+    }
+    ubatch.b_equal_seqs = true;
+    ubatch.n_tokens = n_tokens;
+    ubatch.n_seq_tokens = n_tokens;
+    ubatch.n_seqs = 1;
+    ubatch.n_seqs_unq = 1;
+    ubatch.n_pos = n_pos;
+    ubatch.token = udata->token.data();
+    ubatch.embd = nullptr;
+    ubatch.pos = udata->pos.data();
+    ubatch.n_seq_id = udata->n_seq_id.data();
+    ubatch.seq_id = udata->seq_id.data();
+    ubatch.seq_id_unq = udata->seq_id_unq.data();
+    ubatch.seq_idx = udata->seq_idx.data();
+    ubatch.output = udata->output.data();
+    ubatch.data = std::move(udata);
+
+    seq_rm(seq_id, static_cast<llama_pos>(desc.token_start), static_cast<llama_pos>(desc.token_start + desc.token_count));
+    const slot_info sinfo = find_slot(ubatch, false);
+    if (sinfo.empty()) {
+        error = "failed to allocate KV cache cells for imported page";
+        return false;
+    }
+    apply_ubatch(sinfo, ubatch);
+
+    const char * src = static_cast<const char *>(input);
+    for (const auto * layer : selected) {
+        auto * k = layer->k_stream[strm];
+        for (uint32_t i = 0; i < n_tokens; ++i) {
+            ggml_backend_tensor_set(k, src, static_cast<size_t>(sinfo.idxs[0][i]) * desc.k_row_bytes, desc.k_row_bytes);
+            src += desc.k_row_bytes;
+        }
+    }
+
+    auto & cells = v_cells[strm];
+    if (!v_trans) {
+        for (const auto * layer : selected) {
+            auto * v = layer->v_stream[strm];
+            for (uint32_t i = 0; i < n_tokens; ++i) {
+                ggml_backend_tensor_set(v, src, static_cast<size_t>(sinfo.idxs[0][i]) * desc.v_row_bytes, desc.v_row_bytes);
+                src += desc.v_row_bytes;
+            }
+        }
+    } else {
+        for (const auto * layer : selected) {
+            auto * v = layer->v_stream[strm];
+            const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(layer->il);
+            for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                for (uint32_t i = 0; i < n_tokens; ++i) {
+                    const size_t dst_offset = (static_cast<size_t>(sinfo.idxs[0][i]) + static_cast<size_t>(j) * cells.size()) * desc.v_element_bytes;
+                    ggml_backend_tensor_set(v, src, dst_offset, desc.v_element_bytes);
+                    src += desc.v_element_bytes;
+                }
+            }
+        }
+    }
+
+    return src == static_cast<const char *>(input) + input_bytes;
+}
+
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
     uint32_t result = 0;
 
