@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 18
+#define SKIPPY_ABI_VERSION_PATCH 19
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -357,6 +357,24 @@ LLAMA_API enum skippy_status skippy_session_copy_output_activation_frame(
 LLAMA_API enum skippy_status skippy_trim_session(
         struct skippy_session * session,
         uint64_t token_count,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_save_prefix(
+        struct skippy_session * session,
+        int32_t cache_seq_id,
+        uint64_t token_count,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_restore_prefix(
+        struct skippy_session * session,
+        int32_t cache_seq_id,
+        const llama_token * token_ids,
+        size_t token_count,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_drop_sequence(
+        struct skippy_session * session,
+        int32_t seq_id,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_tokenize(
