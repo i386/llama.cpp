@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 15
+#define SKIPPY_ABI_VERSION_PATCH 16
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -106,9 +106,12 @@ struct skippy_runtime_config {
     int32_t layer_end;
     int32_t ctx_size;
     int32_t lane_count;
+    int32_t n_batch;
+    int32_t n_ubatch;
     int32_t n_gpu_layers;
     int32_t cache_type_k;
     int32_t cache_type_v;
+    int32_t flash_attn_type;
 
     enum skippy_load_mode load_mode;
 

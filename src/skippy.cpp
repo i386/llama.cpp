@@ -1216,11 +1216,13 @@ static enum skippy_status skippy_finish_model_open(
 
     llama_context_params params = llama_context_default_params();
     params.n_ctx = config != nullptr && config->ctx_size > 0 ? static_cast<uint32_t>(config->ctx_size) : 512;
-    params.n_batch = params.n_ctx;
+    params.n_batch = config != nullptr && config->n_batch > 0 ? static_cast<uint32_t>(config->n_batch) : params.n_ctx;
+    params.n_ubatch = config != nullptr && config->n_ubatch > 0 ? static_cast<uint32_t>(config->n_ubatch) : 0u;
     params.n_seq_max = stage_model->lane_count;
     params.kv_unified = stage_model->lane_count > 1;
     params.type_k = config != nullptr && config->cache_type_k > 0 ? static_cast<ggml_type>(config->cache_type_k) : GGML_TYPE_F16;
     params.type_v = config != nullptr && config->cache_type_v > 0 ? static_cast<ggml_type>(config->cache_type_v) : GGML_TYPE_F16;
+    params.flash_attn_type = config != nullptr ? static_cast<llama_flash_attn_type>(config->flash_attn_type) : LLAMA_FLASH_ATTN_TYPE_AUTO;
     params.embeddings = config != nullptr && config->filter_tensors_on_load && !config->include_output;
     if (llm_arch_is_recurrent(model->arch) || llm_arch_is_hybrid(model->arch)) {
         params.n_seq_max = std::max<uint32_t>(2, stage_model->lane_count * 2);
