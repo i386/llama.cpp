@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 16
+#define SKIPPY_ABI_VERSION_PATCH 17
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -49,6 +49,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_PACKAGE_PART_LOAD      = 1 << 18,
     SKIPPY_FEATURE_GENERATION_SIGNALS     = 1 << 19,
     SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL = 1 << 20,
+    SKIPPY_FEATURE_CHAT_TEMPLATE_TOOLS    = 1 << 21,
 };
 
 enum skippy_status {
@@ -387,6 +388,32 @@ LLAMA_API enum skippy_status skippy_apply_chat_template(
         char * output_text,
         size_t output_text_capacity,
         size_t * out_text_bytes,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_apply_chat_template_json(
+        struct skippy_model * model,
+        const char * messages_json,
+        const char * tools_json,
+        const char * tool_choice_json,
+        bool add_assistant,
+        bool override_enable_thinking,
+        bool enable_thinking,
+        bool parallel_tool_calls,
+        char * output_text,
+        size_t output_text_capacity,
+        size_t * out_text_bytes,
+        char * output_metadata_json,
+        size_t output_metadata_json_capacity,
+        size_t * out_metadata_json_bytes,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_parse_chat_response_json(
+        const char * generated_text,
+        const char * metadata_json,
+        bool is_partial,
+        char * output_message_json,
+        size_t output_message_json_capacity,
+        size_t * out_message_json_bytes,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_model_info_open(
