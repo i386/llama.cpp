@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 14
+#define SKIPPY_ABI_VERSION_PATCH 15
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -36,26 +36,19 @@ enum skippy_feature {
     SKIPPY_FEATURE_ARTIFACT_SLICE         = 1 << 2,
     SKIPPY_FEATURE_MODEL_INTROSPECTION    = 1 << 3,
     SKIPPY_FEATURE_GGUF_SLICE_WRITE       = 1 << 4,
-    SKIPPY_FEATURE_STATE_IMPORT_EXPORT    = 1 << 5,
     SKIPPY_FEATURE_TOKENIZE_DETOKENIZE    = 1 << 6,
     SKIPPY_FEATURE_ACTIVATION_FRAME       = 1 << 7,
-    SKIPPY_FEATURE_NATIVE_KV_PAGE         = 1 << 8,
     SKIPPY_FEATURE_SESSION_RESET          = 1 << 9,
     SKIPPY_FEATURE_BATCH_VERIFY           = 1 << 10,
     SKIPPY_FEATURE_CHAT_TEMPLATE          = 1 << 11,
     SKIPPY_FEATURE_SAMPLING_CONFIG        = 1 << 12,
     SKIPPY_FEATURE_BATCH_VERIFY_FRAME     = 1 << 13,
-    SKIPPY_FEATURE_RECURRENT_STATE        = 1 << 14,
     SKIPPY_FEATURE_LOGIT_BIAS             = 1 << 15,
     SKIPPY_FEATURE_SESSION_TRIM           = 1 << 16,
     SKIPPY_FEATURE_SESSION_CHECKPOINT     = 1 << 17,
     SKIPPY_FEATURE_PACKAGE_PART_LOAD      = 1 << 18,
     SKIPPY_FEATURE_GENERATION_SIGNALS     = 1 << 19,
     SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL = 1 << 20,
-};
-
-enum skippy_kv_page_flag {
-    SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED      = 1 << 0,
 };
 
 enum skippy_status {
@@ -112,6 +105,7 @@ struct skippy_runtime_config {
     int32_t layer_start;
     int32_t layer_end;
     int32_t ctx_size;
+    int32_t lane_count;
     int32_t n_gpu_layers;
     int32_t cache_type_k;
     int32_t cache_type_v;
@@ -165,22 +159,6 @@ struct skippy_sampling_config {
     uint32_t logit_bias_count;
     uint32_t reserved;
     llama_logit_bias logit_bias[SKIPPY_MAX_LOGIT_BIAS];
-};
-
-struct skippy_kv_page_desc {
-    uint32_t version;
-    int32_t layer_start;
-    int32_t layer_end;
-    uint64_t token_start;
-    uint64_t token_count;
-    uint32_t layer_count;
-    uint32_t k_type;
-    uint32_t v_type;
-    uint32_t k_row_bytes;
-    uint32_t v_row_bytes;
-    uint32_t v_element_bytes;
-    uint64_t payload_bytes;
-    uint64_t flags;
 };
 
 struct skippy_abi_version {
@@ -364,75 +342,9 @@ LLAMA_API enum skippy_status skippy_session_copy_output_activation_frame(
         size_t * out_output_payload_bytes,
         struct skippy_error ** out_error);
 
-LLAMA_API enum skippy_status skippy_export_state(
-        struct skippy_session * session,
-        int32_t layer_start,
-        int32_t layer_end,
-        void * output,
-        size_t output_capacity,
-        size_t * out_bytes,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_import_state(
-        struct skippy_session * session,
-        int32_t layer_start,
-        int32_t layer_end,
-        const void * input,
-        size_t input_bytes,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_export_full_state(
-        struct skippy_session * session,
-        int32_t layer_start,
-        int32_t layer_end,
-        void * output,
-        size_t output_capacity,
-        size_t * out_bytes,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_export_recurrent_state(
-        struct skippy_session * session,
-        void * output,
-        size_t output_capacity,
-        size_t * out_bytes,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_import_full_state(
-        struct skippy_session * session,
-        int32_t layer_start,
-        int32_t layer_end,
-        const void * input,
-        size_t input_bytes,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_import_recurrent_state(
-        struct skippy_session * session,
-        const void * input,
-        size_t input_bytes,
-        struct skippy_error ** out_error);
-
 LLAMA_API enum skippy_status skippy_trim_session(
         struct skippy_session * session,
         uint64_t token_count,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_export_kv_page(
-        struct skippy_session * session,
-        int32_t layer_start,
-        int32_t layer_end,
-        uint64_t token_start,
-        uint64_t token_count,
-        struct skippy_kv_page_desc * out_desc,
-        void * output,
-        size_t output_capacity,
-        size_t * out_bytes,
-        struct skippy_error ** out_error);
-
-LLAMA_API enum skippy_status skippy_import_kv_page(
-        struct skippy_session * session,
-        const struct skippy_kv_page_desc * desc,
-        const void * input,
-        size_t input_bytes,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_tokenize(
