@@ -20,13 +20,22 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <cstdio>
 #include <limits>
 #include <regex>
 #include <set>
 #include <string>
+#include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__) && defined(__MACH__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 using json = nlohmann::ordered_json;
 
@@ -484,6 +493,37 @@ static bool skippy_is_full_model_config(const struct skippy_runtime_config * con
     }
 
     return !config->filter_tensors_on_load && config->layer_start == 0;
+}
+
+static int32_t skippy_default_thread_count() {
+#ifdef __linux__
+    std::unordered_set<std::string> siblings;
+    for (uint32_t cpu = 0; cpu < UINT32_MAX; ++cpu) {
+        std::ifstream thread_siblings(
+                "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/thread_siblings");
+        if (!thread_siblings.is_open()) {
+            break;
+        }
+        std::string line;
+        if (std::getline(thread_siblings, line)) {
+            siblings.insert(line);
+        }
+    }
+    if (!siblings.empty()) {
+        return static_cast<int32_t>(siblings.size());
+    }
+#elif defined(__APPLE__) && defined(__MACH__)
+    int32_t physical_cores = 0;
+    size_t len = sizeof(physical_cores);
+    if (sysctlbyname("hw.perflevel0.physicalcpu", &physical_cores, &len, NULL, 0) == 0 && physical_cores > 0) {
+        return physical_cores;
+    }
+    if (sysctlbyname("hw.physicalcpu", &physical_cores, &len, NULL, 0) == 0 && physical_cores > 0) {
+        return physical_cores;
+    }
+#endif
+    const unsigned int n_threads = std::thread::hardware_concurrency();
+    return n_threads > 0 ? static_cast<int32_t>(n_threads <= 4 ? n_threads : n_threads / 2) : 4;
 }
 
 static enum skippy_status skippy_apply_selected_backend_device(
@@ -1471,6 +1511,8 @@ static enum skippy_status skippy_finish_model_open(
     params.n_ctx = config != nullptr && config->ctx_size > 0 ? static_cast<uint32_t>(config->ctx_size) : 512;
     params.n_batch = config != nullptr && config->n_batch > 0 ? static_cast<uint32_t>(config->n_batch) : params.n_ctx;
     params.n_ubatch = config != nullptr && config->n_ubatch > 0 ? static_cast<uint32_t>(config->n_ubatch) : 0u;
+    params.n_threads = config != nullptr && config->n_threads > 0 ? config->n_threads : skippy_default_thread_count();
+    params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : params.n_threads;
     params.n_seq_max = stage_model->lane_count;
     params.kv_unified = stage_model->lane_count > 1;
     params.type_k = config != nullptr && config->cache_type_k > 0 ? static_cast<ggml_type>(config->cache_type_k) : GGML_TYPE_F16;
