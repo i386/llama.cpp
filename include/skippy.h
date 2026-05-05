@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 20
+#define SKIPPY_ABI_VERSION_PATCH 21
 
 #define SKIPPY_MAX_LOGIT_BIAS 256
 
@@ -225,6 +225,14 @@ LLAMA_API const struct llama_model * skippy_model_llama_model(
 
 LLAMA_API enum skippy_status skippy_session_create(
         struct skippy_model * model,
+        struct skippy_session ** out_session,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_create_from_resident_prefix(
+        struct skippy_model * model,
+        int32_t cache_seq_id,
+        const llama_token * token_ids,
+        size_t token_count,
         struct skippy_session ** out_session,
         struct skippy_error ** out_error);
 
