@@ -1615,6 +1615,7 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_FALCON_H1 &&
             model->arch != LLM_ARCH_MINIMAX_M2 &&
             model->arch != LLM_ARCH_OLMO &&
+            model->arch != LLM_ARCH_PHI2 &&
             model->arch != LLM_ARCH_PHI3 &&
             model->arch != LLM_ARCH_STARCODER2 &&
             model->arch != LLM_ARCH_STABLELM) {

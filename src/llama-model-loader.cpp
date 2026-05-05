@@ -18,6 +18,7 @@ static const size_t MiB = 1024*kiB;
 static const size_t GiB = 1024*MiB;
 
 static thread_local llama_model_loader_stage_filter g_skippy_filter;
+static thread_local bool g_skippy_last_tensor_filtered = false;
 
 void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter & filter) {
     g_skippy_filter = filter;
@@ -25,6 +26,10 @@ void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter &
 
 void llama_model_loader_clear_stage_filter() {
     g_skippy_filter = {};
+}
+
+bool llama_model_loader_last_tensor_filtered() {
+    return g_skippy_last_tensor_filtered;
 }
 
 const char * llama_file_version_name(llama_fver version) {
@@ -1180,6 +1185,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                     if (!(flags & TENSOR_DUPLICATED)) {
                         n_created++;
                     }
+                    g_skippy_last_tensor_filtered = true;
+                } else {
+                    g_skippy_last_tensor_filtered = false;
                 }
 
                 return nullptr;
@@ -1187,11 +1195,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         }
 
         if (!t_meta) {
+            g_skippy_last_tensor_filtered = false;
             if (flags & TENSOR_NOT_REQUIRED) {
                 return nullptr;
             }
             throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
         }
+
+        g_skippy_last_tensor_filtered = false;
 
         // skip unused tensors
         if (info.op == GGML_OP_NONE || (flags & TENSOR_SKIP)) {

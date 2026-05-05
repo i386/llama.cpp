@@ -30,6 +30,7 @@ struct llama_model_loader_stage_filter {
 
 void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter & filter);
 void llama_model_loader_clear_stage_filter();
+bool llama_model_loader_last_tensor_filtered();
 
 enum llama_fver {
     GGUF_FILE_VERSION_V1 = 1,
