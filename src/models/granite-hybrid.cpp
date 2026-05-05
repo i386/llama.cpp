@@ -139,11 +139,16 @@ llama_model_granite_hybrid::graph::graph(const llama_model & model, const llm_gr
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     auto * inp = build_inp_mem_hybrid();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
     // Positional embeddings populated if rope enabled
     ggml_tensor * inp_pos = nullptr;
@@ -151,7 +156,7 @@ llama_model_granite_hybrid::graph::graph(const llama_model & model, const llm_gr
         inp_pos = build_inp_pos();
     }
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         struct ggml_tensor * inpSA = inpL;
 
         // norm
@@ -176,6 +181,12 @@ llama_model_granite_hybrid::graph::graph(const llama_model & model, const llm_gr
 
         // input for next layer
         inpL = cur;
+    }
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(inpL, "stage_boundary", il_end - 1);
+        res->t_embd = inpL;
+        ggml_build_forward_expand(gf, inpL);
+        return;
     }
 
     cur = inpL;
