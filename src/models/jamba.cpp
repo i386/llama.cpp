@@ -111,14 +111,19 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
     // {n_embd, n_tokens}
-    inpL = build_inp_embd(model.tok_embd);
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     auto * inp_hybrid = build_inp_mem_hybrid();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         const int64_t n_head_kv = hparams.n_head_kv(il);
 
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
@@ -137,7 +142,7 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, NULL, NULL, NULL, 1.0f/sqrtf(float(n_embd_head)), il);
         }
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur  = ggml_get_rows(ctx0,  cur, inp_out_ids);
             inpL = ggml_get_rows(ctx0, inpL, inp_out_ids);
         }
@@ -182,6 +187,13 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
         // input for next layer
         inpL = cur;
     }
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(inpL, "stage_boundary", il_end - 1);
+        res->t_embd = inpL;
+        ggml_build_forward_expand(gf, inpL);
+        return;
+    }
+
     // final rmsnorm
     cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
 
