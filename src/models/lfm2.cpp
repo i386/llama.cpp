@@ -217,7 +217,20 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
     };
 
     // actual graph construction starts here
-    ggml_tensor * cur = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    bool has_attention_layer = false;
+    for (int il = il_start; il < il_end; ++il) {
+        if (!hparams.is_recr(il)) {
+            has_attention_layer = true;
+            break;
+        }
+    }
+
+    ggml_tensor * cur = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
     cb(cur, "model.embed_tokens", -1);
 
     ggml_build_forward_expand(gf, cur);
@@ -229,10 +242,10 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
         inp_hybrid = build_inp_mem_hybrid();
     }
 
-    ggml_tensor * inp_pos     = build_inp_pos();
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_pos     = has_attention_layer ? build_inp_pos() : nullptr;
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         const bool is_moe_layer = il >= static_cast<int>(hparams.n_layer_dense_lead);
 
         auto * prev_cur = cur;
@@ -242,7 +255,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
         cur = hparams.is_recr(il) ? build_shortconv_block(cur, inp_hybrid->get_recr(), il) :
                                     build_attn_block(cur, inp_pos, inp_hybrid->get_attn(), il);
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur      = ggml_get_rows(ctx0, cur, inp_out_ids);
             prev_cur = ggml_get_rows(ctx0, prev_cur, inp_out_ids);
         }
@@ -260,6 +273,13 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
 
         cur = build_cvec(cur, il);
         cb(cur, "l_out", il);
+    }
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
     }
 
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);

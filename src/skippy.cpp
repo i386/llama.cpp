@@ -1472,6 +1472,7 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_GPTNEOX &&
             model->arch != LLM_ARCH_GRANITE &&
             model->arch != LLM_ARCH_INTERNLM2 &&
+            model->arch != LLM_ARCH_LFM2 &&
             model->arch != LLM_ARCH_MISTRAL3 &&
             model->arch != LLM_ARCH_MPT &&
             model->arch != LLM_ARCH_OLMO2 &&
