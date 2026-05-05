@@ -1461,6 +1461,9 @@ static enum skippy_status skippy_finish_model_open(
     if (config != nullptr && config->filter_tensors_on_load) {
         const int32_t n_layer = llama_model_n_layer(model);
         if (model->arch != LLM_ARCH_LLAMA &&
+            model->arch != LLM_ARCH_BAICHUAN &&
+            model->arch != LLM_ARCH_BLOOM &&
+            model->arch != LLM_ARCH_GPTNEOX &&
             model->arch != LLM_ARCH_QWEN2 &&
             model->arch != LLM_ARCH_QWEN3 &&
             model->arch != LLM_ARCH_QWEN3NEXT &&
@@ -1474,7 +1477,9 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_DEEPSEEK2 &&
             model->arch != LLM_ARCH_FALCON_H1 &&
             model->arch != LLM_ARCH_MINIMAX_M2 &&
-            model->arch != LLM_ARCH_OLMO) {
+            model->arch != LLM_ARCH_OLMO &&
+            model->arch != LLM_ARCH_PHI3 &&
+            model->arch != LLM_ARCH_STABLELM) {
             llama_model_free(model);
             skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "runtime-slice execution is not supported for this model architecture yet");
             return SKIPPY_STATUS_UNSUPPORTED;
