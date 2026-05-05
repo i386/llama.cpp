@@ -773,9 +773,6 @@ static enum skippy_status skippy_decode_tokens(
     llama_batch_free(batch);
     if (status == SKIPPY_STATUS_OK) {
         skippy_record_tokens(session, token_ids, token_count);
-        if (request_logits) {
-            skippy_record_signal(session, -1);
-        }
     }
     return status;
 }
@@ -1799,6 +1796,9 @@ enum skippy_status skippy_session_last_token_signal(
     if (session == nullptr || out_signal == nullptr) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session and out_signal are required");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (session->signal_history.size() < static_cast<size_t>(std::max(session->n_past, 0))) {
+        skippy_record_signal(session, -1);
     }
     if (session->signal_history.empty()) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "no token signal is available");
