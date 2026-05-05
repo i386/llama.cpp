@@ -1938,10 +1938,15 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
 
     res->t_inp_embd = cur;
 
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool skippy_mid_stage_input = stage_filter.enabled && stage_filter.layer_start > 0;
+
     // For Granite architecture
     // NOTE: For deepstack models, only apply scale to token inputs (ie text-only input).
     //  Raw embeddings are assumed to be multimodal inputs that should not be scaled.
-    if (hparams.f_embedding_scale != 0.0f && (ubatch.token || hparams.n_deepstack_layers == 0)) {
+    // A skippy mid-stage vector input is already a post-layer activation, not a
+    // raw embedding, so do not scale it again.
+    if (!skippy_mid_stage_input && hparams.f_embedding_scale != 0.0f && (ubatch.token || hparams.n_deepstack_layers == 0)) {
         if (!ggml_is_contiguous(cur)) {
             cur = ggml_cont(ctx0, cur);
         }
