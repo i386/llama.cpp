@@ -244,6 +244,9 @@ LLAMA_API struct llama_context * skippy_session_llama_context(
 LLAMA_API int32_t skippy_session_position(
         const struct skippy_session * session);
 
+LLAMA_API int32_t skippy_session_native_seq_id(
+        const struct skippy_session * session);
+
 LLAMA_API int32_t skippy_session_batch_size(
         const struct skippy_session * session);
 

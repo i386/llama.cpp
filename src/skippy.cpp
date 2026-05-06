@@ -1751,6 +1751,11 @@ int32_t skippy_session_position(
     return session != nullptr ? session->n_past : -1;
 }
 
+int32_t skippy_session_native_seq_id(
+        const struct skippy_session * session) {
+    return session != nullptr ? session->seq_id : -1;
+}
+
 int32_t skippy_session_batch_size(
         const struct skippy_session * session) {
     return session != nullptr && session->ctx != nullptr ? llama_n_batch(session->ctx) : 0;
