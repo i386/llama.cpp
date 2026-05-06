@@ -1487,6 +1487,7 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_QWEN3VL &&
             model->arch != LLM_ARCH_QWEN35MOE &&
             model->arch != LLM_ARCH_QWEN3MOE &&
+            model->arch != LLM_ARCH_RWKV6 &&
             model->arch != LLM_ARCH_GEMMA &&
             model->arch != LLM_ARCH_GEMMA2 &&
             model->arch != LLM_ARCH_GEMMA3 &&
