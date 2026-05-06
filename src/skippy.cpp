@@ -1590,6 +1590,7 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_GRANITE_MOE &&
             model->arch != LLM_ARCH_HUNYUAN_DENSE &&
             model->arch != LLM_ARCH_HUNYUAN_MOE &&
+            model->arch != LLM_ARCH_HUNYUAN_VL &&
             model->arch != LLM_ARCH_INTERNLM2 &&
             model->arch != LLM_ARCH_JAMBA &&
             model->arch != LLM_ARCH_LFM2 &&
@@ -1605,6 +1606,7 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_QWEN2VL &&
             model->arch != LLM_ARCH_QWEN3VL &&
             model->arch != LLM_ARCH_QWEN2MOE &&
+            model->arch != LLM_ARCH_QWEN35 &&
             model->arch != LLM_ARCH_QWEN35MOE &&
             model->arch != LLM_ARCH_QWEN3MOE &&
             model->arch != LLM_ARCH_RWKV6 &&
