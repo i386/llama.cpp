@@ -65,7 +65,12 @@ llama_model_starcoder::graph::graph(const llama_model & model, const llm_graph_p
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
@@ -78,9 +83,9 @@ llama_model_starcoder::graph::graph(const llama_model & model, const llm_graph_p
     inpL = ggml_add(ctx0, inpL, pos);
     cb(inpL, "inpL", -1);
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         cur = build_norm(inpL,
                 model.layers[il].attn_norm,
                 model.layers[il].attn_norm_b,
@@ -128,6 +133,13 @@ llama_model_starcoder::graph::graph(const llama_model & model, const llm_graph_p
         // input for next layer
         inpL = cur;
     }
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(inpL, "stage_boundary", il_end - 1);
+        res->t_embd = inpL;
+        ggml_build_forward_expand(gf, inpL);
+        return;
+    }
+
     cur = build_norm(inpL,
             model.output_norm,
             model.output_norm_b,

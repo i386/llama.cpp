@@ -82,15 +82,20 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const float v_scale = hparams.f_attn_value_scale;
+
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     ggml_tensor * inp_pos = build_inp_pos();
     auto * inp_attn = build_attn_inp_kv_iswa();
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    const float v_scale = hparams.f_attn_value_scale;
-
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         ggml_tensor * inpSA = inpL;
 
         uint32_t n_head_l    = hparams.n_head(il);
@@ -168,7 +173,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
             }
         }
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -217,6 +222,13 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
     }
 
     cur = inpL;
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,

@@ -87,7 +87,12 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     auto * rs_inp = build_rs_inp();
 
@@ -95,9 +100,9 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
     const auto n_seq_tokens = ubatch.n_seq_tokens;
     const auto n_seqs = ubatch.n_seqs;
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         const llama_layer * layer = &model.layers[il];
         inpL = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
 
@@ -153,6 +158,13 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
     }
 
     cur = inpL;
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
     cur = build_norm(cur, model.output_norm, model.output_norm_b, LLM_NORM_RMS, -1);
 
     cb(cur, "result_norm", -1);

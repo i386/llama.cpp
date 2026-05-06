@@ -75,7 +75,12 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     // scale the input embeddings
     inpL = ggml_scale(ctx0, inpL, scale_embd);
@@ -86,9 +91,9 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
 
     auto * inp_attn = build_attn_inp_kv();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         ggml_tensor * inpSA = inpL;
 
         ggml_tensor * rope_factors = model.get_rope_factors(cparams, il);
@@ -237,6 +242,13 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
         inpL = cur;
     }
     cur = inpL;
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,

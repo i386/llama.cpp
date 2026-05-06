@@ -74,7 +74,12 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
     const int64_t head_dim_v = hparams.n_embd_head_v();
 
     ggml_tensor * cur;
-    ggml_tensor * inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    ggml_tensor * inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
     ggml_tensor * inp_pos = build_inp_pos();
 
     using inp_attn_type = std::conditional_t<iswa, llm_graph_input_attn_kv_iswa, llm_graph_input_attn_kv>;
@@ -86,9 +91,9 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
         inp_attn = build_attn_inp_kv();
     }
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         ggml_tensor * residual = inpL;
 
         float freq_base_l  = 0.0f;
@@ -182,6 +187,13 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
     }
 
     cur = inpL;
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
     res->t_embd = cur;
