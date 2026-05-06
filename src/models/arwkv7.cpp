@@ -124,7 +124,12 @@ llama_model_arwkv7::graph::graph(const llama_model & model, const llm_graph_para
     ggml_tensor * inpL;
     ggml_tensor * v_first = nullptr;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     auto * rs_inp = build_rs_inp();
 
@@ -132,9 +137,18 @@ llama_model_arwkv7::graph::graph(const llama_model & model, const llm_graph_para
     const auto n_seq_tokens = ubatch.n_seq_tokens;
     const auto n_seqs = ubatch.n_seqs;
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    if (stage_filtered && il_start > 0) {
+        auto inp = std::make_unique<llm_graph_input_rwkv7_v_first>(n_embd);
+        inp->values = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_tokens);
+        cb(inp->values, "inp_rwkv7_v_first", -1);
+        ggml_set_input(inp->values);
+        v_first = inp->values;
+        res->add_input(std::move(inp));
+    }
 
-    for (int il = 0; il < n_layer; ++il) {
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
+
+    for (int il = il_start; il < il_end; ++il) {
         const llama_layer * layer = &model.layers[il];
         inpL = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
 
@@ -151,6 +165,9 @@ llama_model_arwkv7::graph::graph(const llama_model & model, const llm_graph_para
                 );
 
         cur = build_rwkv7_time_mix(rs_inp, att_norm, x_prev, v_first, ubatch, il);
+        if (stage_filtered && !stage_filter.include_output && il_start == 0 && il == 0) {
+            res->t_skippy_rwkv7_v_first = v_first;
+        }
 
         token_shift = ggml_view_3d(ctx0, att_norm, n_embd, 1, n_seqs, att_norm->nb[1], att_norm->nb[2], (n_seq_tokens-1)*n_embd*ggml_element_size(att_norm));
         ggml_build_forward_expand(gf, build_rwkv_token_shift_store(token_shift, ubatch, il));
@@ -161,7 +178,7 @@ llama_model_arwkv7::graph::graph(const llama_model & model, const llm_graph_para
         cur     = ggml_reshape_2d(ctx0, cur,     n_embd, n_tokens);
         ffn_inp = ggml_reshape_2d(ctx0, ffn_inp, n_embd, n_tokens);
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur     = ggml_get_rows(ctx0, cur,     inp_out_ids);
             ffn_inp = ggml_get_rows(ctx0, ffn_inp, inp_out_ids);
         }
@@ -186,6 +203,12 @@ llama_model_arwkv7::graph::graph(const llama_model & model, const llm_graph_para
 
         // input for next layer
         inpL = cur;
+    }
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(inpL, "stage_boundary", il_end - 1);
+        res->t_embd = inpL;
+        ggml_build_forward_expand(gf, inpL);
+        return;
     }
     cur = inpL;
     cur = build_norm(cur, model.output_norm, model.output_norm_b, LLM_NORM_RMS, -1);

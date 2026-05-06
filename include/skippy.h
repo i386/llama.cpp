@@ -99,6 +99,8 @@ enum skippy_activation_layout {
     SKIPPY_ACTIVATION_LAYOUT_TOKEN_MAJOR  = 1,
 };
 
+#define SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST (UINT64_C(1) << 0)
+
 struct skippy_model;
 struct skippy_session;
 struct skippy_model_info;

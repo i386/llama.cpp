@@ -21,6 +21,7 @@
 
 static thread_local skippy_graph_filter g_skippy_graph_filter;
 static thread_local skippy_activation_tokens g_skippy_activation_tokens;
+static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
 
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
     g_skippy_graph_filter = filter;
@@ -44,6 +45,18 @@ void skippy_graph_clear_activation_tokens() {
 
 const skippy_activation_tokens & skippy_graph_get_activation_tokens() {
     return g_skippy_activation_tokens;
+}
+
+void skippy_graph_set_rwkv7_v_first(const skippy_activation_rwkv7_v_first & values) {
+    g_skippy_rwkv7_v_first = values;
+}
+
+void skippy_graph_clear_rwkv7_v_first() {
+    g_skippy_rwkv7_v_first = {};
+}
+
+const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first() {
+    return g_skippy_rwkv7_v_first;
 }
 
 // dedup helpers
@@ -176,6 +189,19 @@ void llm_graph_input_stage_tokens::set_input(const llama_ubatch * ubatch) {
 
 bool llm_graph_input_stage_tokens::can_reuse(const llm_graph_params & params) {
     return tokens && tokens->ne[0] == params.ubatch.n_tokens;
+}
+
+void llm_graph_input_rwkv7_v_first::set_input(const llama_ubatch * ubatch) {
+    const skippy_activation_rwkv7_v_first & sideband = skippy_graph_get_rwkv7_v_first();
+    GGML_ASSERT(sideband.values != nullptr);
+    GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+    GGML_ASSERT(sideband.n_embd == n_embd);
+
+    ggml_backend_tensor_set(values, sideband.values, 0, sideband.token_count*n_embd*ggml_element_size(values));
+}
+
+bool llm_graph_input_rwkv7_v_first::can_reuse(const llm_graph_params & params) {
+    return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens;
 }
 
 void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
@@ -953,6 +979,7 @@ void llm_graph_result::reset() {
     t_logits      = nullptr;
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
+    t_skippy_rwkv7_v_first = nullptr;
 
     t_layer_inp.resize(LLAMA_MAX_LAYERS);
     std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
@@ -997,6 +1024,9 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
     }
     if (t_h_nextn != nullptr) {
         ggml_set_output(t_h_nextn);
+    }
+    if (t_skippy_rwkv7_v_first != nullptr) {
+        ggml_set_output(t_skippy_rwkv7_v_first);
     }
     {
         const auto & embeddings_layer_inp = params.cparams.embeddings_layer_inp;

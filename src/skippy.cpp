@@ -631,6 +631,34 @@ struct skippy_activation_tokens_scope {
     bool enabled = false;
 };
 
+struct skippy_rwkv7_v_first_scope {
+    skippy_rwkv7_v_first_scope(
+            const skippy_activation_desc * desc,
+            const void * payload,
+            size_t hidden_bytes,
+            int32_t n_embd) {
+        if (desc != nullptr &&
+            payload != nullptr &&
+            (desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0 &&
+            desc->payload_bytes >= hidden_bytes) {
+            skippy_activation_rwkv7_v_first sideband;
+            sideband.values = reinterpret_cast<const float *>(static_cast<const uint8_t *>(payload) + hidden_bytes);
+            sideband.token_count = desc->token_count;
+            sideband.n_embd = static_cast<uint32_t>(n_embd);
+            skippy_graph_set_rwkv7_v_first(sideband);
+            enabled = true;
+        }
+    }
+
+    ~skippy_rwkv7_v_first_scope() {
+        if (enabled) {
+            skippy_graph_clear_rwkv7_v_first();
+        }
+    }
+
+    bool enabled = false;
+};
+
 static bool skippy_is_filtered(const skippy_session * session) {
     return session != nullptr &&
            session->stage_model != nullptr &&
@@ -641,7 +669,15 @@ static bool skippy_emits_activation_frame(const skippy_session * session) {
     return skippy_is_filtered(session) && !session->stage_model->config.include_output;
 }
 
-static size_t skippy_activation_payload_bytes(const skippy_session * session, size_t token_count) {
+static bool skippy_is_rwkv7_activation_model(const skippy_session * session) {
+    if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
+        return false;
+    }
+    const llm_arch arch = session->stage_model->model->arch;
+    return arch == LLM_ARCH_RWKV7 || arch == LLM_ARCH_ARWKV7;
+}
+
+static size_t skippy_activation_hidden_bytes(const skippy_session * session, size_t token_count) {
     if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
         return 0;
     }
@@ -649,6 +685,35 @@ static size_t skippy_activation_payload_bytes(const skippy_session * session, si
     return token_count *
            static_cast<size_t>(llama_model_n_embd(session->stage_model->model)) *
            sizeof(float);
+}
+
+static uint64_t skippy_output_activation_flags(
+        const skippy_session * session,
+        const skippy_activation_desc * input_desc) {
+    if (!skippy_emits_activation_frame(session) || !skippy_is_rwkv7_activation_model(session)) {
+        return 0;
+    }
+
+    const skippy_runtime_config & config = session->stage_model->config;
+    if (config.layer_start == 0 && config.layer_end > 0) {
+        return SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST;
+    }
+    if (input_desc != nullptr && (input_desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
+        return SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST;
+    }
+    return 0;
+}
+
+static size_t skippy_activation_payload_bytes(
+        const skippy_session * session,
+        size_t token_count,
+        uint64_t flags) {
+    const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
+    size_t payload_bytes = hidden_bytes;
+    if ((flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
+        payload_bytes += hidden_bytes;
+    }
+    return payload_bytes;
 }
 
 static bool skippy_has_activation_payload(const skippy_activation_desc * desc, const void * payload) {
@@ -694,7 +759,21 @@ static enum skippy_status skippy_validate_frame_input(
         return SKIPPY_STATUS_INVALID_ARGUMENT;
     }
 
-    const size_t expected_bytes = skippy_activation_payload_bytes(session, expected_token_count);
+    const uint64_t supported_flags = SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST;
+    if ((input_desc->flags & ~supported_flags) != 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "activation frame has unsupported sideband flags");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0 && !skippy_is_rwkv7_activation_model(session)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "RWKV7 v_first sideband is only valid for RWKV7 stages");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (skippy_is_rwkv7_activation_model(session) && (input_desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) == 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "non-first RWKV7 runtime slices require v_first activation sideband");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t expected_bytes = skippy_activation_payload_bytes(session, expected_token_count, input_desc->flags);
     if (input_desc->payload_bytes != expected_bytes) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "activation frame payload size does not match model hidden size");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
@@ -710,9 +789,11 @@ static enum skippy_status skippy_prepare_output_activation_frame(
         size_t output_payload_capacity,
         size_t * out_output_payload_bytes,
         skippy_activation_desc * output_desc,
+        const skippy_activation_desc * input_desc,
         struct skippy_error ** out_error) {
+    const uint64_t output_flags = skippy_output_activation_flags(session, input_desc);
     const size_t payload_bytes = skippy_emits_activation_frame(session) ?
-            skippy_activation_payload_bytes(session, token_count) : 0;
+            skippy_activation_payload_bytes(session, token_count, output_flags) : 0;
 
     if (out_output_payload_bytes != nullptr) {
         *out_output_payload_bytes = payload_bytes;
@@ -743,7 +824,7 @@ static enum skippy_status skippy_prepare_output_activation_frame(
         output_desc->token_count = static_cast<uint32_t>(std::min<size_t>(token_count, std::numeric_limits<uint32_t>::max()));
         output_desc->sequence_count = token_count > 0 ? 1 : 0;
         output_desc->payload_bytes = payload_bytes;
-        output_desc->flags = 0;
+        output_desc->flags = output_flags;
     }
 
     return SKIPPY_STATUS_OK;
@@ -1312,6 +1393,8 @@ static enum skippy_status skippy_copy_output_activation_frame(
         skippy_session * session,
         size_t token_count,
         void * output_payload,
+        const skippy_activation_desc * input_desc,
+        const void * input_payload,
         struct skippy_error ** out_error) {
     if (!skippy_emits_activation_frame(session)) {
         return skippy_success(out_error);
@@ -1323,8 +1406,36 @@ static enum skippy_status skippy_copy_output_activation_frame(
         return SKIPPY_STATUS_RUNTIME_ERROR;
     }
 
-    const size_t payload_bytes = skippy_activation_payload_bytes(session, token_count);
-    std::memcpy(output_payload, embeddings, payload_bytes);
+    const uint64_t output_flags = skippy_output_activation_flags(session, input_desc);
+    const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
+    std::memcpy(output_payload, embeddings, hidden_bytes);
+
+    if ((output_flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
+        uint8_t * sideband_output = static_cast<uint8_t *>(output_payload) + hidden_bytes;
+        const skippy_runtime_config & config = session->stage_model->config;
+        if (config.layer_start == 0) {
+            llm_graph_result * res = session->ctx->get_gf_res_prev();
+            ggml_tensor * v_first = res != nullptr ? res->get_skippy_rwkv7_v_first() : nullptr;
+            if (v_first == nullptr) {
+                skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "RWKV7 v_first sideband output was not available");
+                return SKIPPY_STATUS_RUNTIME_ERROR;
+            }
+            if (ggml_nbytes(v_first) < hidden_bytes) {
+                skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "RWKV7 v_first sideband tensor is smaller than activation hidden payload");
+                return SKIPPY_STATUS_RUNTIME_ERROR;
+            }
+            ggml_backend_tensor_get(v_first, sideband_output, 0, hidden_bytes);
+        } else {
+            if (input_desc == nullptr ||
+                input_payload == nullptr ||
+                (input_desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) == 0 ||
+                input_desc->payload_bytes < hidden_bytes * 2) {
+                skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "RWKV7 downstream slice cannot forward missing v_first sideband");
+                return SKIPPY_STATUS_INVALID_ARGUMENT;
+            }
+            std::memcpy(sideband_output, static_cast<const uint8_t *>(input_payload) + hidden_bytes, hidden_bytes);
+        }
+    }
     return skippy_success(out_error);
 }
 
@@ -1349,7 +1460,8 @@ static enum skippy_status skippy_decode_activation_frame(
     const int32_t n_embd = llama_model_n_embd(session->stage_model->model);
     llama_batch batch = llama_batch_init(n_tokens, n_embd, 1);
     batch.n_tokens = n_tokens;
-    std::memcpy(batch.embd, input_payload, static_cast<size_t>(input_desc->payload_bytes));
+    const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
+    std::memcpy(batch.embd, input_payload, hidden_bytes);
 
     for (int32_t i = 0; i < n_tokens; ++i) {
         batch.pos[i] = session->n_past + i;
@@ -1359,6 +1471,7 @@ static enum skippy_status skippy_decode_activation_frame(
     }
 
     skippy_activation_tokens_scope activation_tokens_scope(token_ids, token_count);
+    skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     llama_batch_free(batch);
     return status;
@@ -1383,7 +1496,8 @@ static enum skippy_status skippy_verify_activation_frame(
     const int32_t n_embd = llama_model_n_embd(session->stage_model->model);
     llama_batch batch = llama_batch_init(n_tokens, n_embd, 1);
     batch.n_tokens = n_tokens;
-    std::memcpy(batch.embd, input_payload, static_cast<size_t>(input_desc->payload_bytes));
+    const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
+    std::memcpy(batch.embd, input_payload, hidden_bytes);
 
     for (int32_t i = 0; i < n_tokens; ++i) {
         batch.pos[i] = session->n_past + i;
@@ -1392,6 +1506,7 @@ static enum skippy_status skippy_verify_activation_frame(
         batch.logits[i] = 1;
     }
 
+    skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     llama_batch_free(batch);
     return status;
@@ -1489,6 +1604,8 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_QWEN35MOE &&
             model->arch != LLM_ARCH_QWEN3MOE &&
             model->arch != LLM_ARCH_RWKV6 &&
+            model->arch != LLM_ARCH_RWKV7 &&
+            model->arch != LLM_ARCH_ARWKV7 &&
             model->arch != LLM_ARCH_GEMMA &&
             model->arch != LLM_ARCH_GEMMA2 &&
             model->arch != LLM_ARCH_GEMMA3 &&
@@ -2145,6 +2262,7 @@ enum skippy_status skippy_prefill_chunk_frame(
             output_payload_capacity,
             out_output_payload_bytes,
             output_desc,
+            input_desc,
             out_error);
     if (status != SKIPPY_STATUS_OK) {
         return status;
@@ -2159,7 +2277,7 @@ enum skippy_status skippy_prefill_chunk_frame(
         return status;
     }
 
-    return skippy_copy_output_activation_frame(session, token_count, output_payload, out_error);
+    return skippy_copy_output_activation_frame(session, token_count, output_payload, input_desc, input_payload, out_error);
 }
 
 enum skippy_status skippy_decode_step_frame(
@@ -2216,6 +2334,7 @@ enum skippy_status skippy_decode_step_frame_sampled(
             output_payload_capacity,
             out_output_payload_bytes,
             output_desc,
+            input_desc,
             out_error);
     if (status != SKIPPY_STATUS_OK) {
         return status;
@@ -2234,7 +2353,7 @@ enum skippy_status skippy_decode_step_frame_sampled(
         *out_predicted_token = session->stage_model->config.include_output ? skippy_sample_token(session, sampling) : -1;
     }
 
-    return skippy_copy_output_activation_frame(session, 1, output_payload, out_error);
+    return skippy_copy_output_activation_frame(session, 1, output_payload, input_desc, input_payload, out_error);
 }
 
 enum skippy_status skippy_verify_tokens_frame(
@@ -2284,6 +2403,7 @@ enum skippy_status skippy_verify_tokens_frame(
             output_payload_capacity,
             out_output_payload_bytes,
             output_desc,
+            input_desc,
             out_error);
     if (status != SKIPPY_STATUS_OK) {
         return status;
@@ -2314,7 +2434,7 @@ enum skippy_status skippy_verify_tokens_frame(
         return status;
     }
 
-    status = skippy_copy_output_activation_frame(session, token_count, output_payload, out_error);
+    status = skippy_copy_output_activation_frame(session, token_count, output_payload, input_desc, input_payload, out_error);
     if (status != SKIPPY_STATUS_OK) {
         return status;
     }
@@ -2348,11 +2468,12 @@ enum skippy_status skippy_session_copy_output_activation_frame(
             output_payload_capacity,
             out_output_payload_bytes,
             output_desc,
+            nullptr,
             out_error);
     if (status != SKIPPY_STATUS_OK) {
         return status;
     }
-    return skippy_copy_output_activation_frame(session, token_count, output_payload, out_error);
+    return skippy_copy_output_activation_frame(session, token_count, output_payload, nullptr, nullptr, out_error);
 }
 
 static enum skippy_status skippy_validate_state_range(

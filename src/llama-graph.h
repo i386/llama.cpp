@@ -41,12 +41,21 @@ struct skippy_activation_tokens {
     uint32_t token_count = 0;
 };
 
+struct skippy_activation_rwkv7_v_first {
+    const float * values = nullptr;
+    uint32_t token_count = 0;
+    uint32_t n_embd = 0;
+};
+
 void skippy_graph_set_filter(const skippy_graph_filter & filter);
 void skippy_graph_clear_filter();
 const skippy_graph_filter & skippy_graph_get_filter();
 void skippy_graph_set_activation_tokens(const skippy_activation_tokens & tokens);
 void skippy_graph_clear_activation_tokens();
 const skippy_activation_tokens & skippy_graph_get_activation_tokens();
+void skippy_graph_set_rwkv7_v_first(const skippy_activation_rwkv7_v_first & values);
+void skippy_graph_clear_rwkv7_v_first();
+const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first();
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -170,6 +179,21 @@ public:
     bool can_reuse(const llm_graph_params & params) override;
 
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
+};
+
+class llm_graph_input_rwkv7_v_first : public llm_graph_input_i {
+public:
+    llm_graph_input_rwkv7_v_first(int64_t n_embd) : n_embd(n_embd) {}
+    virtual ~llm_graph_input_rwkv7_v_first() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * values = nullptr; // F32 [n_embd, n_batch]
+
+private:
+    int64_t n_embd;
 };
 
 class llm_graph_input_pos : public llm_graph_input_i {
@@ -736,6 +760,7 @@ public:
     ggml_tensor * get_embd()        const { return t_embd; }
     ggml_tensor * get_embd_pooled() const { return t_embd_pooled; }
     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
+    ggml_tensor * get_skippy_rwkv7_v_first() const { return t_skippy_rwkv7_v_first; }
 
     ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
 
@@ -767,6 +792,7 @@ public:
     ggml_tensor * t_embd        = nullptr;
     ggml_tensor * t_embd_pooled = nullptr;
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
+    ggml_tensor * t_skippy_rwkv7_v_first = nullptr;
 
     std::vector<ggml_tensor *> t_layer_inp;
 
