@@ -72,16 +72,18 @@ llama_model_starcoder::graph::graph(const llama_model & model, const llm_graph_p
 
     inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
-    // inp_pos - contains the positions
-    ggml_tensor * inp_pos = build_inp_pos();
-
     auto * inp_attn = build_attn_inp_kv();
 
-    ggml_tensor * pos = ggml_get_rows(ctx0, model.pos_embd, inp_pos);
-    cb(pos, "pos_embd", -1);
+    if (!stage_filtered || il_start == 0) {
+        // inp_pos - contains the positions
+        ggml_tensor * inp_pos = build_inp_pos();
 
-    inpL = ggml_add(ctx0, inpL, pos);
-    cb(inpL, "inpL", -1);
+        ggml_tensor * pos = ggml_get_rows(ctx0, model.pos_embd, inp_pos);
+        cb(pos, "pos_embd", -1);
+
+        inpL = ggml_add(ctx0, inpL, pos);
+        cb(inpL, "inpL", -1);
+    }
 
     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
