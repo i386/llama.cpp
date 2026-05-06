@@ -1633,7 +1633,7 @@ static enum skippy_status skippy_finish_model_open(
             skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "layer_end exceeds model layer count");
             return SKIPPY_STATUS_INVALID_ARGUMENT;
         }
-        if (config->include_embeddings && config->layer_start != 0) {
+        if (config->include_embeddings && config->layer_start != 0 && !config->include_output) {
             llama_model_free(model);
             skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "only the first runtime slice may include token embeddings");
             return SKIPPY_STATUS_INVALID_ARGUMENT;
