@@ -2317,17 +2317,23 @@ enum skippy_status skippy_verify_tokens(
     return status;
 }
 
-enum skippy_status skippy_prefill_chunk_frame(
+static enum skippy_status skippy_prefill_chunk_frame_impl(
         struct skippy_session * session,
         const llama_token * token_ids,
         size_t token_count,
+        bool request_logits,
+        const struct skippy_sampling_config * sampling,
         const struct skippy_activation_desc * input_desc,
         const void * input_payload,
         struct skippy_activation_desc * output_desc,
         void * output_payload,
         size_t output_payload_capacity,
         size_t * out_output_payload_bytes,
+        llama_token * out_predicted_token,
         struct skippy_error ** out_error) {
+    if (out_predicted_token != nullptr) {
+        *out_predicted_token = -1;
+    }
     if (token_count == 0) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "token_count must be greater than zero");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
@@ -2361,15 +2367,76 @@ enum skippy_status skippy_prefill_chunk_frame(
     }
 
     if (skippy_is_filtered(session) && session->stage_model->config.layer_start > 0) {
-        status = skippy_decode_activation_frame(session, input_desc, input_payload, token_ids, token_count, false, out_error);
+        status = skippy_decode_activation_frame(session, input_desc, input_payload, token_ids, token_count, request_logits, out_error);
     } else {
-        status = skippy_decode_tokens(session, token_ids, token_count, false, out_error);
+        status = skippy_decode_tokens(session, token_ids, token_count, request_logits, out_error);
     }
     if (status != SKIPPY_STATUS_OK) {
         return status;
     }
 
+    if (out_predicted_token != nullptr) {
+        *out_predicted_token = session->stage_model->config.include_output ?
+                skippy_sample_token(session, sampling) : -1;
+    }
+
     return skippy_copy_output_activation_frame(session, token_count, output_payload, input_desc, input_payload, out_error);
+}
+
+enum skippy_status skippy_prefill_chunk_frame(
+        struct skippy_session * session,
+        const llama_token * token_ids,
+        size_t token_count,
+        const struct skippy_activation_desc * input_desc,
+        const void * input_payload,
+        struct skippy_activation_desc * output_desc,
+        void * output_payload,
+        size_t output_payload_capacity,
+        size_t * out_output_payload_bytes,
+        struct skippy_error ** out_error) {
+    return skippy_prefill_chunk_frame_impl(
+            session,
+            token_ids,
+            token_count,
+            false,
+            nullptr,
+            input_desc,
+            input_payload,
+            output_desc,
+            output_payload,
+            output_payload_capacity,
+            out_output_payload_bytes,
+            nullptr,
+            out_error);
+}
+
+enum skippy_status skippy_prefill_chunk_frame_sampled(
+        struct skippy_session * session,
+        const llama_token * token_ids,
+        size_t token_count,
+        const struct skippy_sampling_config * sampling,
+        const struct skippy_activation_desc * input_desc,
+        const void * input_payload,
+        struct skippy_activation_desc * output_desc,
+        void * output_payload,
+        size_t output_payload_capacity,
+        size_t * out_output_payload_bytes,
+        llama_token * out_predicted_token,
+        struct skippy_error ** out_error) {
+    return skippy_prefill_chunk_frame_impl(
+            session,
+            token_ids,
+            token_count,
+            true,
+            sampling,
+            input_desc,
+            input_payload,
+            output_desc,
+            output_payload,
+            output_payload_capacity,
+            out_output_payload_bytes,
+            out_predicted_token,
+            out_error);
 }
 
 enum skippy_status skippy_decode_step_frame(
