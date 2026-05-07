@@ -1764,12 +1764,14 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_LFM2 &&
             model->arch != LLM_ARCH_LLADA &&
             model->arch != LLM_ARCH_LLADA_MOE &&
+            model->arch != LLM_ARCH_LLAMA4 &&
             model->arch != LLM_ARCH_MAINCODER &&
             model->arch != LLM_ARCH_MAMBA &&
             model->arch != LLM_ARCH_MAMBA2 &&
             model->arch != LLM_ARCH_MIMO2 &&
             model->arch != LLM_ARCH_MINICPM3 &&
             model->arch != LLM_ARCH_MISTRAL3 &&
+            model->arch != LLM_ARCH_MISTRAL4 &&
             model->arch != LLM_ARCH_MPT &&
             model->arch != LLM_ARCH_NEMOTRON &&
             model->arch != LLM_ARCH_OLMO2 &&

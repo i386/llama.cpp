@@ -674,19 +674,19 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
         mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
     }
 
-    if (self_k_rot) {
+    if (self_k_rot && self_k_rot->buffer) {
         mctx->get_base()->set_input_k_rot(self_k_rot);
     }
 
-    if (self_v_rot) {
+    if (self_v_rot && self_v_rot->buffer) {
         mctx->get_base()->set_input_v_rot(self_v_rot);
     }
 
-    if (self_k_rot_swa) {
+    if (self_k_rot_swa && self_k_rot_swa->buffer) {
         mctx->get_swa()->set_input_k_rot(self_k_rot_swa);
     }
 
-    if (self_v_rot_swa) {
+    if (self_v_rot_swa && self_v_rot_swa->buffer) {
         mctx->get_swa()->set_input_v_rot(self_v_rot_swa);
     }
 }
@@ -778,7 +778,7 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -801,10 +801,16 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask, mctx->get_attn(), params.ubatch, params.cparams);
 
-    res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
+        res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+    }
 
-    res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
-    res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+    if (inp_rs->s_copy_main && inp_rs->s_copy_main->buffer) {
+        res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+    }
+    if (inp_rs->s_copy_extra && inp_rs->s_copy_extra->buffer) {
+        res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+    }
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
@@ -827,7 +833,7 @@ void llm_graph_input_mem_hybrid_k::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -849,10 +855,16 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask, mctx->get_attn(), params.ubatch, params.cparams);
 
-    res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
+        res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+    }
 
-    res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
-    res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+    if (inp_rs->s_copy_main && inp_rs->s_copy_main->buffer) {
+        res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+    }
+    if (inp_rs->s_copy_extra && inp_rs->s_copy_extra->buffer) {
+        res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+    }
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
@@ -901,7 +913,7 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -937,10 +949,16 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask_swa, attn_ctx->get_swa(), params.ubatch, params.cparams);
 
-    res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
+        res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
+    }
 
-    res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
-    res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+    if (inp_rs->s_copy_main && inp_rs->s_copy_main->buffer) {
+        res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+    }
+    if (inp_rs->s_copy_extra && inp_rs->s_copy_extra->buffer) {
+        res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+    }
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();

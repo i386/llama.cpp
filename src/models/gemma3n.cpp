@@ -112,6 +112,25 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
         inpL = inp->values;
         res->add_input(std::move(inp));
 
+        const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
+        const bool use_activation_token_sideband =
+            activation_tokens.tokens != nullptr &&
+            activation_tokens.token_count == ubatch.n_tokens &&
+            model.tok_embd != nullptr;
+
+        if (use_activation_token_sideband) {
+            auto stage_inp = std::make_unique<llm_graph_input_stage_tokens>();
+            stage_inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
+            cb(stage_inp->tokens, "inp_stage_tokens", -1);
+            ggml_set_input(stage_inp->tokens);
+
+            inp_per_layer_proj = ggml_get_rows(ctx0, model.tok_embd, stage_inp->tokens);
+            inp_per_layer_proj = ggml_scale(ctx0, inp_per_layer_proj, sqrtf(n_embd));
+            cb(inp_per_layer_proj, "inp_per_layer_proj_embd", -1);
+
+            res->add_input(std::move(stage_inp));
+        }
+
     } else {
         inpL = build_inp_embd(model.tok_embd);
 

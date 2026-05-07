@@ -113,14 +113,30 @@ llama_model_llama4::graph<iswa>::graph(const llama_model & model, const llm_grap
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+
+    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
 
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
 
     // temperature tuning
     ggml_tensor * inp_attn_scale = nullptr;
-    inp_attn_scale = build_inp_attn_scale();
+    bool uses_attn_temp = false;
+    for (int il = il_start; il < il_end; ++il) {
+        const bool use_rope = hparams.n_no_rope_layer_step > 0 &&
+                              (il + 1) % hparams.n_no_rope_layer_step != 0;
+        if (!use_rope) {
+            uses_attn_temp = true;
+            break;
+        }
+    }
+    if (uses_attn_temp) {
+        inp_attn_scale = build_inp_attn_scale();
+    }
 
     using inp_attn_type = std::conditional_t<iswa, llm_graph_input_attn_kv_iswa, llm_graph_input_attn_kv>;
     inp_attn_type * inp_attn = nullptr;
@@ -133,9 +149,9 @@ llama_model_llama4::graph<iswa>::graph(const llama_model & model, const llm_grap
 
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f/sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
         const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
 
@@ -191,7 +207,7 @@ llama_model_llama4::graph<iswa>::graph(const llama_model & model, const llm_grap
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
             cb(cur, "attn_out", il);
         }
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == il_end - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -252,6 +268,13 @@ llama_model_llama4::graph<iswa>::graph(const llama_model & model, const llm_grap
         inpL = cur;
     }
     cur = inpL;
+
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        res->t_embd = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,
