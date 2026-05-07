@@ -83,6 +83,17 @@ struct skippy_tensor_meta {
     uint64_t size = 0;
 };
 
+static uint64_t skippy_tensor_element_count(const skippy_tensor_meta & tensor) {
+    uint64_t count = 1;
+    for (const int64_t dim : tensor.ne) {
+        if (dim <= 0 || count > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(dim)) {
+            return 0;
+        }
+        count *= static_cast<uint64_t>(dim);
+    }
+    return tensor.ne.empty() ? 0 : count;
+}
+
 struct skippy_slice_range {
     int32_t stage_index = -1;
     int32_t layer_start = 0;
@@ -3670,7 +3681,8 @@ enum skippy_status skippy_model_info_tensor_at(
     out_tensor->role = skippy_role_from_name(name, layer_index);
     out_tensor->ggml_type = static_cast<uint32_t>(gguf_get_tensor_type(info->ctx, tensor_id));
     out_tensor->byte_size = static_cast<uint64_t>(gguf_get_tensor_size(info->ctx, tensor_id));
-    out_tensor->element_count = 0;
+    out_tensor->element_count = index < info->tensors.size() ?
+            skippy_tensor_element_count(info->tensors[index]) : 0;
     return skippy_success(out_error);
 }
 
