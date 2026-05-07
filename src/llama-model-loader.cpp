@@ -1132,6 +1132,19 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return it->second.get();
     };
 
+    auto requested_shape_matches = [&](const ggml_tensor * t_meta) -> bool {
+        if (t_meta == nullptr) {
+            return false;
+        }
+        for (size_t i = 0; i < GGML_MAX_DIMS; ++i) {
+            const int64_t dim = i < ne.size() ? ne.begin()[i] : 1;
+            if (dim != t_meta->ne[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     auto buft_for_tensor = [&](ggml_tensor * t_meta) -> ggml_backend_buffer_type_t {
         // some models use the token embedding tensor as the output, but since these are used in different layers and with different ops
         // the tensor is duplicated
@@ -1175,15 +1188,24 @@ struct ggml_tensor * llama_model_loader::create_tensor(
 
             if (!keep) {
                 if (t_meta) {
+                    const bool requested_tensor_exists =
+                            !(flags & TENSOR_NOT_REQUIRED) || requested_shape_matches(t_meta);
+                    const std::string tensor_name = tn.str();
+                    bool first_filtered_request = true;
+                    if (requested_tensor_exists) {
+                        first_filtered_request = skippy_counted_filtered_tensors.insert(tensor_name).second;
+                    }
                     const size_t nbytes = ggml_nbytes(t_meta);
                     LLAMA_LOG_DEBUG(
                             "llama_model_loader: stage filter skipping tensor %s (size = %zu bytes)\n",
-                            tn.str().c_str(),
+                            tensor_name.c_str(),
                             nbytes);
 
-                    size_data -= nbytes;
-                    if (!(flags & TENSOR_DUPLICATED)) {
-                        n_created++;
+                    if (requested_tensor_exists && first_filtered_request) {
+                        size_data -= nbytes;
+                        if (!(flags & TENSOR_DUPLICATED)) {
+                            n_created++;
+                        }
                     }
                     g_skippy_last_tensor_filtered = true;
                 } else {
