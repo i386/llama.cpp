@@ -1937,6 +1937,39 @@ int32_t skippy_session_batch_size(
     return session != nullptr && session->ctx != nullptr ? llama_n_batch(session->ctx) : 0;
 }
 
+enum skippy_status skippy_session_begin_external_decode(
+        struct skippy_session * session,
+        struct skippy_error ** out_error) {
+    if (session == nullptr || session->stage_model == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+
+    const skippy_runtime_config & config = session->stage_model->config;
+    if (config.filter_tensors_on_load) {
+        skippy_graph_filter filter;
+        filter.enabled = true;
+        filter.layer_start = config.layer_start;
+        filter.layer_end = config.layer_end;
+        filter.include_embeddings = config.include_embeddings;
+        filter.include_output = config.include_output;
+        skippy_graph_set_filter(filter);
+    }
+
+    return skippy_success(out_error);
+}
+
+enum skippy_status skippy_session_end_external_decode(
+        struct skippy_session * session,
+        struct skippy_error ** out_error) {
+    if (session == nullptr) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session is required");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    skippy_graph_clear_filter();
+    return skippy_success(out_error);
+}
+
 enum skippy_status skippy_session_set_position(
         struct skippy_session * session,
         int32_t n_past,

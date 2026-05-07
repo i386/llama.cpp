@@ -252,6 +252,14 @@ LLAMA_API int32_t skippy_session_native_seq_id(
 LLAMA_API int32_t skippy_session_batch_size(
         const struct skippy_session * session);
 
+LLAMA_API enum skippy_status skippy_session_begin_external_decode(
+        struct skippy_session * session,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_session_end_external_decode(
+        struct skippy_session * session,
+        struct skippy_error ** out_error);
+
 LLAMA_API enum skippy_status skippy_session_set_position(
         struct skippy_session * session,
         int32_t n_past,
