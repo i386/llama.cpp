@@ -22,6 +22,7 @@
 static thread_local skippy_graph_filter g_skippy_graph_filter;
 static thread_local skippy_activation_tokens g_skippy_activation_tokens;
 static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
+static thread_local skippy_activation_gemma3n_altup g_skippy_gemma3n_altup;
 
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
     g_skippy_graph_filter = filter;
@@ -57,6 +58,18 @@ void skippy_graph_clear_rwkv7_v_first() {
 
 const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first() {
     return g_skippy_rwkv7_v_first;
+}
+
+void skippy_graph_set_gemma3n_altup(const skippy_activation_gemma3n_altup & values) {
+    g_skippy_gemma3n_altup = values;
+}
+
+void skippy_graph_clear_gemma3n_altup() {
+    g_skippy_gemma3n_altup = {};
+}
+
+const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup() {
+    return g_skippy_gemma3n_altup;
 }
 
 // dedup helpers
@@ -202,6 +215,20 @@ void llm_graph_input_rwkv7_v_first::set_input(const llama_ubatch * ubatch) {
 
 bool llm_graph_input_rwkv7_v_first::can_reuse(const llm_graph_params & params) {
     return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens;
+}
+
+void llm_graph_input_gemma3n_altup::set_input(const llama_ubatch * ubatch) {
+    const skippy_activation_gemma3n_altup & sideband = skippy_graph_get_gemma3n_altup();
+    GGML_ASSERT(sideband.values != nullptr);
+    GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+    GGML_ASSERT(sideband.n_embd == n_embd);
+    GGML_ASSERT(sideband.n_altup == n_altup);
+
+    ggml_backend_tensor_set(values, sideband.values, 0, sideband.token_count*n_embd*n_altup*ggml_element_size(values));
+}
+
+bool llm_graph_input_gemma3n_altup::can_reuse(const llm_graph_params & params) {
+    return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens && values->ne[2] == n_altup;
 }
 
 void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
@@ -980,6 +1007,7 @@ void llm_graph_result::reset() {
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
     t_skippy_rwkv7_v_first = nullptr;
+    t_skippy_gemma3n_altup = nullptr;
 
     t_layer_inp.resize(LLAMA_MAX_LAYERS);
     std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
@@ -1027,6 +1055,9 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
     }
     if (t_skippy_rwkv7_v_first != nullptr) {
         ggml_set_output(t_skippy_rwkv7_v_first);
+    }
+    if (t_skippy_gemma3n_altup != nullptr) {
+        ggml_set_output(t_skippy_gemma3n_altup);
     }
     {
         const auto & embeddings_layer_inp = params.cparams.embeddings_layer_inp;

@@ -98,11 +98,28 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+    const bool stage_filtered = stage_filter.enabled;
+    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
 
-    // important: do not normalize weights for raw embeddings input (i.e. encoded image embeddings)
-    inpL = ggml_scale(ctx0, inpL, ubatch.token ? sqrtf(n_embd) : 1.0f);
-    cb(inpL, "inp_scaled", -1);
+    ggml_tensor * inp_per_layer_proj = nullptr;
+    if (stage_filtered && il_start > 0) {
+        auto inp = std::make_unique<llm_graph_input_gemma3n_altup>(n_embd, n_altup);
+        inp->values = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd, ubatch.n_tokens, n_altup);
+        cb(inp->values, "inp_gemma3n_altup", -1);
+        ggml_set_input(inp->values);
+        inpL = inp->values;
+        res->add_input(std::move(inp));
+
+    } else {
+        inpL = build_inp_embd(model.tok_embd);
+
+        // important: do not normalize weights for raw embeddings input (i.e. encoded image embeddings)
+        inpL = ggml_scale(ctx0, inpL, ubatch.token ? sqrtf(n_embd) : 1.0f);
+        cb(inpL, "inp_scaled", -1);
+        inp_per_layer_proj = inpL;
+    }
 
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
@@ -114,11 +131,11 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
     ggml_build_forward_expand(gf, inp_per_layer);
 
     // inp_per_layer now has shape: [n_embd_altup, n_tokens, n_layer]
-    inp_per_layer = project_per_layer_inputs(inpL, inp_per_layer);
+    inp_per_layer = project_per_layer_inputs(inp_per_layer_proj ? inp_per_layer_proj : ggml_view_2d_slice(ctx0, inpL, i_altup_act), inp_per_layer);
 
     // inpL now has only 1 altup, project it to the rest of the altups
     // these "added" altups will be concat to the last dim of inpL
-    {
+    if (!stage_filtered || il_start == 0) {
         ggml_tensor * target_magnitude = calc_magnitude(inpL);
         ggml_tensor * inp_repeated     = ggml_repeat_4d(ctx0, inpL, n_embd, n_tokens, n_altup - 1, 1);
         ggml_tensor * altup_added =
@@ -130,7 +147,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
     }
     // inpL now has shape: [n_embd, n_tokens, n_altup]
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = il_start; il < il_end; ++il) {
         // this block is made to be closely resemble Gemma3p5DecoderLayer on python code
         const float freq_base_l  = model.get_rope_freq_base(cparams, il);
         const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
@@ -262,6 +279,16 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
     }
     cur = inpL;  // [n_embd, n_tokens, n_altup]
 
+    if (stage_filtered && !stage_filter.include_output) {
+        cb(cur, "stage_boundary", il_end - 1);
+        cur = ggml_cont(ctx0, cur);
+        cb(cur, "stage_boundary_cont", il_end - 1);
+        res->t_skippy_gemma3n_altup = cur;
+        res->t_embd = ggml_view_2d_slice(ctx0, cur, i_altup_act);
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
+
     // cur now has multiple altup(s), we want to merge them back to 1 altup
     {
         ggml_tensor * target_magnitude = calc_magnitude(ggml_view_2d_slice(ctx0, cur, i_altup_act));  // [n_embd, n_tokens]
@@ -320,7 +347,12 @@ ggml_tensor * llama_model_gemma3n::graph::build_inp_per_layer() {
     auto inp = std::make_unique<llm_graph_input_embd>(n_embd);
     ggml_tensor * inp_per_layer;
     float tok_embd_scale = sqrtf((float) n_embd_altup);
-    if (ubatch.token) {
+    const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
+    const bool use_activation_token_sideband =
+        activation_tokens.tokens != nullptr &&
+        activation_tokens.token_count == ubatch.n_tokens;
+
+    if (ubatch.token || use_activation_token_sideband) {
         inp->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
         ggml_set_input(inp->tokens);
         res->t_inp_tokens = inp->tokens;
@@ -328,7 +360,14 @@ ggml_tensor * llama_model_gemma3n::graph::build_inp_per_layer() {
         inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, n_embd_altup, n_layer, n_tokens);
         inp_per_layer = ggml_scale     (ctx0, inp_per_layer, tok_embd_scale);
         cb(inp_per_layer, "inp_per_layer_selected", -1);
-        res->add_input(std::move(inp));
+
+        if (ubatch.token) {
+            res->add_input(std::move(inp));
+        } else {
+            auto stage_inp = std::make_unique<llm_graph_input_stage_tokens>();
+            stage_inp->tokens = inp->tokens;
+            res->add_input(std::move(stage_inp));
+        }
     } else {
         // Multimodal embedding path: use padding token (ID=0) embedding
         // TODO: verify if this is the correct behavior in transformers implementation

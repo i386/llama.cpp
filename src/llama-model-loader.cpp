@@ -1185,6 +1185,13 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                        tn.tensor == LLM_TENSOR_PER_LAYER_MODEL_PROJ ||
                        tn.tensor == LLM_TENSOR_PER_LAYER_PROJ_NORM;
             }
+            if (!keep && llm_kv.arch == LLM_ARCH_GEMMA3N) {
+                keep = tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD ||
+                       tn.tensor == LLM_TENSOR_PER_LAYER_MODEL_PROJ ||
+                       tn.tensor == LLM_TENSOR_PER_LAYER_PROJ_NORM ||
+                       (tn.tensor == LLM_TENSOR_ALTUP_PROJ && g_skippy_filter.include_embeddings) ||
+                       (tn.tensor == LLM_TENSOR_ALTUP_UNEMBD_PROJ && g_skippy_filter.include_output);
+            }
 
             if (!keep) {
                 if (t_meta) {
@@ -1192,7 +1199,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                             !(flags & TENSOR_NOT_REQUIRED) || requested_shape_matches(t_meta);
                     const std::string tensor_name = tn.str();
                     bool first_filtered_request = true;
-                    if (requested_tensor_exists) {
+                    if (requested_tensor_exists && !(flags & TENSOR_DUPLICATED)) {
                         first_filtered_request = skippy_counted_filtered_tensors.insert(tensor_name).second;
                     }
                     const size_t nbytes = ggml_nbytes(t_meta);

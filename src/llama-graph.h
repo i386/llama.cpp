@@ -47,6 +47,13 @@ struct skippy_activation_rwkv7_v_first {
     uint32_t n_embd = 0;
 };
 
+struct skippy_activation_gemma3n_altup {
+    const float * values = nullptr;
+    uint32_t token_count = 0;
+    uint32_t n_embd = 0;
+    uint32_t n_altup = 0;
+};
+
 void skippy_graph_set_filter(const skippy_graph_filter & filter);
 void skippy_graph_clear_filter();
 const skippy_graph_filter & skippy_graph_get_filter();
@@ -56,6 +63,9 @@ const skippy_activation_tokens & skippy_graph_get_activation_tokens();
 void skippy_graph_set_rwkv7_v_first(const skippy_activation_rwkv7_v_first & values);
 void skippy_graph_clear_rwkv7_v_first();
 const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first();
+void skippy_graph_set_gemma3n_altup(const skippy_activation_gemma3n_altup & values);
+void skippy_graph_clear_gemma3n_altup();
+const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup();
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -194,6 +204,22 @@ public:
 
 private:
     int64_t n_embd;
+};
+
+class llm_graph_input_gemma3n_altup : public llm_graph_input_i {
+public:
+    llm_graph_input_gemma3n_altup(int64_t n_embd, int64_t n_altup) : n_embd(n_embd), n_altup(n_altup) {}
+    virtual ~llm_graph_input_gemma3n_altup() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * values = nullptr; // F32 [n_embd, n_batch, n_altup]
+
+private:
+    int64_t n_embd;
+    int64_t n_altup;
 };
 
 class llm_graph_input_pos : public llm_graph_input_i {
@@ -761,6 +787,7 @@ public:
     ggml_tensor * get_embd_pooled() const { return t_embd_pooled; }
     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
     ggml_tensor * get_skippy_rwkv7_v_first() const { return t_skippy_rwkv7_v_first; }
+    ggml_tensor * get_skippy_gemma3n_altup() const { return t_skippy_gemma3n_altup; }
 
     ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
 
@@ -793,6 +820,7 @@ public:
     ggml_tensor * t_embd_pooled = nullptr;
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
     ggml_tensor * t_skippy_rwkv7_v_first = nullptr;
+    ggml_tensor * t_skippy_gemma3n_altup = nullptr;
 
     std::vector<ggml_tensor *> t_layer_inp;
 

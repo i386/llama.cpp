@@ -670,6 +670,34 @@ struct skippy_rwkv7_v_first_scope {
     bool enabled = false;
 };
 
+struct skippy_gemma3n_altup_scope {
+    skippy_gemma3n_altup_scope(
+            const skippy_activation_desc * desc,
+            const void * payload,
+            int32_t n_embd,
+            int32_t n_altup) {
+        if (desc != nullptr &&
+            payload != nullptr &&
+            (desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
+            skippy_activation_gemma3n_altup sideband;
+            sideband.values = reinterpret_cast<const float *>(payload);
+            sideband.token_count = desc->token_count;
+            sideband.n_embd = static_cast<uint32_t>(n_embd);
+            sideband.n_altup = static_cast<uint32_t>(n_altup);
+            skippy_graph_set_gemma3n_altup(sideband);
+            enabled = true;
+        }
+    }
+
+    ~skippy_gemma3n_altup_scope() {
+        if (enabled) {
+            skippy_graph_clear_gemma3n_altup();
+        }
+    }
+
+    bool enabled = false;
+};
+
 static bool skippy_is_filtered(const skippy_session * session) {
     return session != nullptr &&
            session->stage_model != nullptr &&
@@ -688,6 +716,13 @@ static bool skippy_is_rwkv7_activation_model(const skippy_session * session) {
     return arch == LLM_ARCH_RWKV7 || arch == LLM_ARCH_ARWKV7;
 }
 
+static bool skippy_is_gemma3n_activation_model(const skippy_session * session) {
+    if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
+        return false;
+    }
+    return session->stage_model->model->arch == LLM_ARCH_GEMMA3N;
+}
+
 static size_t skippy_activation_hidden_bytes(const skippy_session * session, size_t token_count) {
     if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
         return 0;
@@ -698,9 +733,23 @@ static size_t skippy_activation_hidden_bytes(const skippy_session * session, siz
            sizeof(float);
 }
 
+static size_t skippy_gemma3n_altup_bytes(const skippy_session * session, size_t token_count) {
+    if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
+        return 0;
+    }
+    const llama_hparams & hparams = session->stage_model->model->hparams;
+    return token_count *
+           static_cast<size_t>(hparams.n_embd) *
+           static_cast<size_t>(hparams.n_altup) *
+           sizeof(float);
+}
+
 static uint64_t skippy_output_activation_flags(
         const skippy_session * session,
         const skippy_activation_desc * input_desc) {
+    if (skippy_emits_activation_frame(session) && skippy_is_gemma3n_activation_model(session)) {
+        return SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP;
+    }
     if (!skippy_emits_activation_frame(session) || !skippy_is_rwkv7_activation_model(session)) {
         return 0;
     }
@@ -720,6 +769,9 @@ static size_t skippy_activation_payload_bytes(
         size_t token_count,
         uint64_t flags) {
     const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
+    if ((flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
+        return skippy_gemma3n_altup_bytes(session, token_count);
+    }
     size_t payload_bytes = hidden_bytes;
     if ((flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
         payload_bytes += hidden_bytes;
@@ -770,9 +822,22 @@ static enum skippy_status skippy_validate_frame_input(
         return SKIPPY_STATUS_INVALID_ARGUMENT;
     }
 
-    const uint64_t supported_flags = SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST;
+    const uint64_t supported_flags = SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST | SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP;
     if ((input_desc->flags & ~supported_flags) != 0) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "activation frame has unsupported sideband flags");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0 && !skippy_is_gemma3n_activation_model(session)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "Gemma3n AltUp activation payload is only valid for Gemma3n stages");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (skippy_is_gemma3n_activation_model(session) && (input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) == 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "non-first Gemma3n runtime slices require AltUp activation payload");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0 &&
+        (input_desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "Gemma3n AltUp and RWKV7 v_first activation flags cannot be combined");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
     }
     if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0 && !skippy_is_rwkv7_activation_model(session)) {
@@ -1411,14 +1476,30 @@ static enum skippy_status skippy_copy_output_activation_frame(
         return skippy_success(out_error);
     }
 
+    const uint64_t output_flags = skippy_output_activation_flags(session, input_desc);
+    const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
+    if ((output_flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
+        llm_graph_result * res = session->ctx->get_gf_res_prev();
+        ggml_tensor * altup = res != nullptr ? res->get_skippy_gemma3n_altup() : nullptr;
+        const size_t altup_bytes = skippy_gemma3n_altup_bytes(session, token_count);
+        if (altup == nullptr) {
+            skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "Gemma3n AltUp activation output was not available");
+            return SKIPPY_STATUS_RUNTIME_ERROR;
+        }
+        if (ggml_nbytes(altup) < altup_bytes) {
+            skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "Gemma3n AltUp activation tensor is smaller than expected payload");
+            return SKIPPY_STATUS_RUNTIME_ERROR;
+        }
+        ggml_backend_tensor_get(altup, output_payload, 0, altup_bytes);
+        return skippy_success(out_error);
+    }
+
     float * embeddings = llama_get_embeddings(session->ctx);
     if (embeddings == nullptr) {
         skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama embeddings output was not available");
         return SKIPPY_STATUS_RUNTIME_ERROR;
     }
 
-    const uint64_t output_flags = skippy_output_activation_flags(session, input_desc);
-    const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
     std::memcpy(output_payload, embeddings, hidden_bytes);
 
     if ((output_flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
@@ -1472,6 +1553,7 @@ static enum skippy_status skippy_decode_activation_frame(
     const int32_t n_tokens = static_cast<int32_t>(token_count);
     const int32_t n_embd = llama_model_n_embd(session->stage_model->model);
     const int32_t n_embd_inp = llama_model_n_embd_inp(session->stage_model->model);
+    const int32_t n_altup = static_cast<int32_t>(session->stage_model->model->hparams.n_altup);
     const int32_t n_pos_per_embd = session->stage_model->model->hparams.n_pos_per_embd();
     const size_t expected_position_count = static_cast<size_t>(n_tokens)*n_pos_per_embd;
 
@@ -1483,7 +1565,16 @@ static enum skippy_status skippy_decode_activation_frame(
     std::vector<int8_t> logits_storage(n_tokens);
 
     const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
-    if (n_embd_inp == n_embd) {
+    if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
+        const float * input = static_cast<const float *>(input_payload);
+        for (int32_t i = 0; i < n_tokens; ++i) {
+            float * dst = embd_storage.data() + static_cast<size_t>(i)*n_embd_inp;
+            std::memcpy(dst, input + static_cast<size_t>(i)*n_embd, static_cast<size_t>(n_embd)*sizeof(float));
+            if (n_embd_inp > n_embd) {
+                std::memset(dst + n_embd, 0, static_cast<size_t>(n_embd_inp - n_embd)*sizeof(float));
+            }
+        }
+    } else if (n_embd_inp == n_embd) {
         std::memcpy(embd_storage.data(), input_payload, hidden_bytes);
     } else {
         const float * input = static_cast<const float *>(input_payload);
@@ -1527,6 +1618,7 @@ static enum skippy_status skippy_decode_activation_frame(
 
     skippy_activation_tokens_scope activation_tokens_scope(token_ids, token_count);
     skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
+    skippy_gemma3n_altup_scope gemma3n_altup_scope(input_desc, input_payload, n_embd, n_altup);
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     return status;
 }
@@ -1548,6 +1640,7 @@ static enum skippy_status skippy_verify_activation_frame(
 
     const int32_t n_tokens = static_cast<int32_t>(token_count);
     const int32_t n_embd = llama_model_n_embd(session->stage_model->model);
+    const int32_t n_altup = static_cast<int32_t>(session->stage_model->model->hparams.n_altup);
     llama_batch batch = llama_batch_init(n_tokens, n_embd, 1);
     batch.n_tokens = n_tokens;
     const size_t hidden_bytes = skippy_activation_hidden_bytes(session, token_count);
@@ -1561,6 +1654,7 @@ static enum skippy_status skippy_verify_activation_frame(
     }
 
     skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
+    skippy_gemma3n_altup_scope gemma3n_altup_scope(input_desc, input_payload, n_embd, n_altup);
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     llama_batch_free(batch);
     return status;
@@ -1708,6 +1802,7 @@ static enum skippy_status skippy_finish_model_open(
             model->arch != LLM_ARCH_GEMMA &&
             model->arch != LLM_ARCH_GEMMA2 &&
             model->arch != LLM_ARCH_GEMMA3 &&
+            model->arch != LLM_ARCH_GEMMA3N &&
             model->arch != LLM_ARCH_GEMMA4 &&
             model->arch != LLM_ARCH_GLM_DSA &&
             model->arch != LLM_ARCH_GLM4 &&
