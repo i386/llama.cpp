@@ -57,6 +57,7 @@ static void test_seed_oss_tool_with_reasoning(testing & t);
 static void test_nemotron_analysis(testing & t);
 static void test_nemotron_reasoning_detection(testing & t);
 static void test_nemotron_tool_format(testing & t);
+static void test_nemotron_lazy_tool_trigger(testing & t);
 
 // CohereForAI template analysis tests
 static void test_cohere_reasoning_detection(testing & t);
@@ -1306,6 +1307,7 @@ static common_chat_template load_nemotron_template(testing & t) {
 static void test_nemotron_analysis(testing & t) {
     t.test("Nemotron reasoning detection", test_nemotron_reasoning_detection);
     t.test("Nemotron tool format", test_nemotron_tool_format);
+    t.test("Nemotron lazy tool trigger", test_nemotron_lazy_tool_trigger);
 }
 
 static void test_nemotron_reasoning_detection(testing & t) {
@@ -1376,6 +1378,30 @@ static void test_nemotron_tool_format(testing & t) {
 
     // Verify tool support
     t.assert_true("should support tools", analysis.jinja_caps.supports_tools);
+}
+
+static void test_nemotron_lazy_tool_trigger(testing & t) {
+    common_chat_template tmpl = load_nemotron_template(t);
+
+    generation_params params;
+    params.messages              = json::array({ json{{"role", "user"}, {"content", "Call the test function."}} });
+    params.tools                 = build_tools_definition();
+    params.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
+    params.add_generation_prompt = true;
+    params.enable_thinking       = true;
+    params.extra_context         = json::object();
+
+    auto generated = peg_generator::generate_parser(tmpl, params);
+
+    t.assert_true("auto tools should use lazy grammar", generated.grammar_lazy);
+    t.assert_equal("should emit one lazy grammar trigger", size_t(1), generated.grammar_triggers.size());
+    if (!generated.grammar_triggers.empty()) {
+        t.assert_equal("lazy trigger should be a word trigger", static_cast<int>(COMMON_GRAMMAR_TRIGGER_TYPE_WORD),
+                       static_cast<int>(generated.grammar_triggers[0].type));
+        t.assert_equal("lazy trigger should trim trailing whitespace", "<tool_call>", generated.grammar_triggers[0].value);
+    }
+    t.assert_true("grammar should still preserve the full tool marker",
+                  generated.grammar.find("tool-call ::= \"<tool_call>\\n\"") != std::string::npos);
 }
 
 static common_chat_template load_cohere_template(testing & t) {
@@ -2091,4 +2117,3 @@ static void test_tagged_args_with_embedded_quotes(testing & t) {
         }
     }
 }
-

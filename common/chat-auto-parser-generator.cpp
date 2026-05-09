@@ -23,6 +23,18 @@ static void foreach_function(const json & tools, const std::function<void(const 
     }
 }
 
+static bool is_ascii_space(char c) {
+    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == '\v';
+}
+
+static std::string lazy_trigger_marker(const std::string & marker) {
+    std::string trimmed = marker;
+    while (!trimmed.empty() && is_ascii_space(trimmed.back())) {
+        trimmed.pop_back();
+    }
+    return trimmed.empty() ? marker : trimmed;
+}
+
 namespace autoparser {
 
 parser_build_context::parser_build_context(common_chat_peg_builder & p, const generation_params & inputs) :
@@ -101,7 +113,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
         // Set grammar triggers based on tool section markers (fall back to per-call markers)
         if (data.grammar_lazy) {
             data.grammar_triggers = {
-                { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, trigger_marker }
+                { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, lazy_trigger_marker(trigger_marker) }
             };
         }
     }
