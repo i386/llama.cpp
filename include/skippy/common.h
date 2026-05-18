@@ -26,7 +26,7 @@ extern "C" {
 
 #define SKIPPY_ABI_VERSION_MAJOR 0
 #define SKIPPY_ABI_VERSION_MINOR 1
-#define SKIPPY_ABI_VERSION_PATCH 23
+#define SKIPPY_ABI_VERSION_PATCH 24
 
 enum skippy_feature {
     SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,

@@ -1283,6 +1283,9 @@ static llama_sampler * skippy_build_sampling_chain(
     if (sampling->top_p > 0.0f && sampling->top_p < 1.0f) {
         llama_sampler_chain_add(sampler, llama_sampler_init_top_p(sampling->top_p, 1));
     }
+    if (sampling->min_p > 0.0f && sampling->min_p < 1.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_min_p(sampling->min_p, 1));
+    }
     if (sampling->temperature != 1.0f) {
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(sampling->temperature));
     }
@@ -1482,6 +1485,9 @@ static llama_token skippy_sample_token(
     }
     if (sampling->top_p > 0.0f && sampling->top_p < 1.0f) {
         llama_sampler_chain_add(sampler, llama_sampler_init_top_p(sampling->top_p, 1));
+    }
+    if (sampling->min_p > 0.0f && sampling->min_p < 1.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_min_p(sampling->min_p, 1));
     }
     if (sampling->temperature != 1.0f) {
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(sampling->temperature));

@@ -111,7 +111,7 @@ struct skippy_sampling_config {
     float frequency_penalty;
     float repeat_penalty;
     uint32_t logit_bias_count;
-    uint32_t reserved;
+    float min_p;
     llama_logit_bias logit_bias[SKIPPY_MAX_LOGIT_BIAS];
 };
 
