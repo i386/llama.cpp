@@ -751,11 +751,28 @@ llama_memory_context_ptr llama_kv_cache::init_full() {
 }
 
 llama_memory_context_ptr llama_kv_cache::init_update(llama_context * lctx, bool optimize) {
-    GGML_UNUSED(optimize);
-
     bool do_shift = get_has_shift();
+    bool did_compact = false;
 
-    return std::make_unique<llama_kv_cache_context>(this, lctx, do_shift, std::move(sc_info));
+    if (optimize) {
+        if (lctx != nullptr) {
+            lctx->synchronize();
+        }
+
+        const auto moves = compact_cells();
+        did_compact = !moves.empty();
+        if (did_compact) {
+            copy_compacted_cells(moves);
+            LLAMA_LOG_DEBUG("%s: compacted %zu KV cells\n", __func__, moves.size());
+        }
+    }
+
+    return std::make_unique<llama_kv_cache_context>(
+            this,
+            lctx,
+            do_shift,
+            std::move(sc_info),
+            did_compact);
 }
 
 llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_ubatch> & ubatches) {
@@ -1179,6 +1196,93 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
         auto & head = v_heads[sinfo.strm[s]];
 
         head = sinfo.idxs[s].back() + 1;
+    }
+}
+
+std::vector<llama_kv_cache::compaction_move> llama_kv_cache::compact_cells() {
+    std::vector<compaction_move> moves;
+
+    for (uint32_t s = 0; s < n_stream; ++s) {
+        auto & cells = v_cells[s];
+        uint32_t dst = 0;
+
+        for (uint32_t src = 0; src < cells.size(); ++src) {
+            if (cells.is_empty(src)) {
+                continue;
+            }
+            if (src != dst) {
+                moves.push_back({ s, src, dst });
+                cells.mv(src, dst);
+            }
+            ++dst;
+        }
+
+        v_heads[s] = dst;
+    }
+
+    return moves;
+}
+
+static void llama_kv_cache_copy_tensor_bytes(
+        ggml_tensor * tensor,
+        size_t src_offset,
+        size_t dst_offset,
+        size_t size) {
+    if (tensor == nullptr || size == 0 || src_offset == dst_offset) {
+        return;
+    }
+
+    std::vector<uint8_t> bytes(size);
+    ggml_backend_tensor_get(tensor, bytes.data(), src_offset, size);
+    ggml_backend_tensor_set(tensor, bytes.data(), dst_offset, size);
+}
+
+void llama_kv_cache::copy_compacted_cells(const std::vector<compaction_move> & moves) const {
+    for (const auto & layer : layers) {
+        for (const compaction_move & move : moves) {
+            if (move.strm >= layer.k_stream.size()) {
+                continue;
+            }
+
+            auto * k = layer.k_stream[move.strm];
+            if (k != nullptr) {
+                const size_t k_row_bytes = ggml_row_size(k->type, hparams.n_embd_k_gqa(layer.il));
+                llama_kv_cache_copy_tensor_bytes(
+                        k,
+                        static_cast<size_t>(move.src) * k_row_bytes,
+                        static_cast<size_t>(move.dst) * k_row_bytes,
+                        k_row_bytes);
+            }
+
+            if (move.strm >= layer.v_stream.size()) {
+                continue;
+            }
+
+            auto * v = layer.v_stream[move.strm];
+            if (v == nullptr) {
+                continue;
+            }
+
+            const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(layer.il);
+            if (!v_trans) {
+                const size_t v_row_bytes = ggml_row_size(v->type, n_embd_v_gqa);
+                llama_kv_cache_copy_tensor_bytes(
+                        v,
+                        static_cast<size_t>(move.src) * v_row_bytes,
+                        static_cast<size_t>(move.dst) * v_row_bytes,
+                        v_row_bytes);
+            } else {
+                const size_t v_element_bytes = ggml_type_size(v->type);
+                const size_t cells_per_stream = v_cells[move.strm].size();
+                for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                    llama_kv_cache_copy_tensor_bytes(
+                            v,
+                            (static_cast<size_t>(move.src) + static_cast<size_t>(j) * cells_per_stream) * v_element_bytes,
+                            (static_cast<size_t>(move.dst) + static_cast<size_t>(j) * cells_per_stream) * v_element_bytes,
+                            v_element_bytes);
+                }
+            }
+        }
     }
 }
 
@@ -2877,8 +2981,9 @@ llama_kv_cache_context::llama_kv_cache_context(
         llama_kv_cache * kv,
         llama_context * lctx,
         bool do_shift,
-        stream_copy_info sc_info) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), lctx(lctx), do_shift(do_shift), sc_info(std::move(sc_info)) {
-    if (!do_shift && this->sc_info.empty()) {
+        stream_copy_info sc_info,
+        bool did_compact) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), lctx(lctx), do_shift(do_shift), sc_info(std::move(sc_info)) {
+    if (!do_shift && this->sc_info.empty() && !did_compact) {
         status = LLAMA_MEMORY_STATUS_NO_UPDATE;
     }
 }

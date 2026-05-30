@@ -95,6 +95,12 @@ public:
 
     using slot_info_vec_t = std::vector<slot_info>;
 
+    struct compaction_move {
+        uint32_t strm;
+        uint32_t src;
+        uint32_t dst;
+    };
+
     // TODO: refactor the memory instances to not depend on `llama_model`
     //       instead pass all necessary info (e.g. hparams, dev layers, arch, etc.) directly
     //       likely through `struct llama_memory_params`
@@ -213,6 +219,10 @@ public:
 
     // emplace the ubatch context into slot: [sinfo.idxs[0...ubatch.n_tokens - 1]]
     void apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch);
+
+    // move used cells toward the beginning of each stream and copy the backing KV rows
+    std::vector<compaction_move> compact_cells();
+    void copy_compacted_cells(const std::vector<compaction_move> & moves) const;
 
     //
     // input API
@@ -356,7 +366,8 @@ public:
             llama_kv_cache * kv,
             llama_context * lctx,
             bool do_shift,
-            stream_copy_info sc_info);
+            stream_copy_info sc_info,
+            bool did_compact);
 
     // used to create a batch processing context from a batch
     llama_kv_cache_context(
