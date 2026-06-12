@@ -137,10 +137,25 @@ LLAMA_API enum skippy_status skippy_model_open(
         struct skippy_model ** out_model,
         struct skippy_error ** out_error);
 
+LLAMA_API enum skippy_status skippy_model_open_with_events(
+        const char * path,
+        const struct skippy_runtime_config * config,
+        const struct skippy_runtime_event_reporter_v1 * reporter,
+        struct skippy_model ** out_model,
+        struct skippy_error ** out_error);
+
 LLAMA_API enum skippy_status skippy_model_open_from_parts(
         const char * const * paths,
         size_t path_count,
         const struct skippy_runtime_config * config,
+        struct skippy_model ** out_model,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_model_open_from_parts_with_events(
+        const char * const * paths,
+        size_t path_count,
+        const struct skippy_runtime_config * config,
+        const struct skippy_runtime_event_reporter_v1 * reporter,
         struct skippy_model ** out_model,
         struct skippy_error ** out_error);
 
