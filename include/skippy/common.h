@@ -54,6 +54,7 @@ enum skippy_feature {
     SKIPPY_FEATURE_CHAT_SAMPLING_GRAMMAR  = 1 << 22,
     SKIPPY_FEATURE_BACKEND_DEVICES        = 1 << 23,
     SKIPPY_FEATURE_RUNTIME_EVENTS         = 1 << 24,
+    SKIPPY_FEATURE_NATIVE_MTP_N1          = 1 << 25,
 };
 
 enum skippy_status {

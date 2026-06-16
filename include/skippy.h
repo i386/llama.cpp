@@ -131,6 +131,13 @@ struct skippy_kv_page_desc {
     uint64_t flags;
 };
 
+struct skippy_native_mtp_draft {
+    uint32_t version;
+    bool available;
+    llama_token token_id;
+    int64_t proposal_compute_us;
+};
+
 LLAMA_API enum skippy_status skippy_model_open(
         const char * path,
         const struct skippy_runtime_config * config,
@@ -366,6 +373,20 @@ LLAMA_API enum skippy_status skippy_decode_step_frame_sampled(
         size_t output_payload_capacity,
         size_t * out_output_payload_bytes,
         llama_token * out_predicted_token,
+        struct skippy_error ** out_error);
+
+LLAMA_API enum skippy_status skippy_decode_step_frame_sampled_mtp_n1(
+        struct skippy_session * session,
+        llama_token token_id,
+        const struct skippy_sampling_config * sampling,
+        const struct skippy_activation_desc * input_desc,
+        const void * input_payload,
+        struct skippy_activation_desc * output_desc,
+        void * output_payload,
+        size_t output_payload_capacity,
+        size_t * out_output_payload_bytes,
+        llama_token * out_predicted_token,
+        struct skippy_native_mtp_draft * out_mtp_draft,
         struct skippy_error ** out_error);
 
 LLAMA_API enum skippy_status skippy_decode_step_frame_batch_sampled(
