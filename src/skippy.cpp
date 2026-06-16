@@ -2310,21 +2310,6 @@ uint64_t skippy_abi_features(void) {
            SKIPPY_FEATURE_NATIVE_MTP_N1;
 }
 
-const char * skippy_status_string(enum skippy_status status) {
-    switch (status) {
-        case SKIPPY_STATUS_OK:               return "ok";
-        case SKIPPY_STATUS_ERROR:            return "error";
-        case SKIPPY_STATUS_INVALID_ARGUMENT: return "invalid_argument";
-        case SKIPPY_STATUS_UNSUPPORTED:      return "unsupported";
-        case SKIPPY_STATUS_BUFFER_TOO_SMALL: return "buffer_too_small";
-        case SKIPPY_STATUS_IO_ERROR:         return "io_error";
-        case SKIPPY_STATUS_MODEL_ERROR:      return "model_error";
-        case SKIPPY_STATUS_RUNTIME_ERROR:    return "runtime_error";
-    }
-
-    return "unknown";
-}
-
 void skippy_error_free(struct skippy_error * error) {
     if (error == nullptr) {
         return;
@@ -2906,11 +2891,6 @@ int32_t skippy_session_position(
     return session != nullptr ? session->n_past : -1;
 }
 
-int32_t skippy_session_native_seq_id(
-        const struct skippy_session * session) {
-    return session != nullptr ? session->seq_id : -1;
-}
-
 int32_t skippy_session_batch_size(
         const struct skippy_session * session) {
     return session != nullptr && session->ctx != nullptr ? llama_n_batch(session->ctx) : 0;
@@ -3208,29 +3188,6 @@ enum skippy_status skippy_prefill_chunk(
     }
 
     return skippy_decode_tokens(session, token_ids, token_count, false, out_error);
-}
-
-enum skippy_status skippy_decode_step(
-        struct skippy_session * session,
-        llama_token token_id,
-        const void * input_activation,
-        size_t input_activation_bytes,
-        void * output_activation,
-        size_t output_activation_capacity,
-        size_t * out_output_activation_bytes,
-        llama_token * out_predicted_token,
-        struct skippy_error ** out_error) {
-    return skippy_decode_step_sampled(
-            session,
-            token_id,
-            nullptr,
-            input_activation,
-            input_activation_bytes,
-            output_activation,
-            output_activation_capacity,
-            out_output_activation_bytes,
-            out_predicted_token,
-            out_error);
 }
 
 enum skippy_status skippy_decode_step_sampled(
@@ -3569,31 +3526,6 @@ enum skippy_status skippy_prefill_chunk_frame_sampled_with_positions(
             out_error);
 }
 
-enum skippy_status skippy_decode_step_frame(
-        struct skippy_session * session,
-        llama_token token_id,
-        const struct skippy_activation_desc * input_desc,
-        const void * input_payload,
-        struct skippy_activation_desc * output_desc,
-        void * output_payload,
-        size_t output_payload_capacity,
-        size_t * out_output_payload_bytes,
-        llama_token * out_predicted_token,
-        struct skippy_error ** out_error) {
-    return skippy_decode_step_frame_sampled(
-            session,
-            token_id,
-            nullptr,
-            input_desc,
-            input_payload,
-            output_desc,
-            output_payload,
-            output_payload_capacity,
-            out_output_payload_bytes,
-            out_predicted_token,
-            out_error);
-}
-
 enum skippy_status skippy_decode_step_frame_sampled(
         struct skippy_session * session,
         llama_token token_id,
@@ -3859,37 +3791,6 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
     }
 
     return skippy_success(out_error);
-}
-
-enum skippy_status skippy_verify_tokens_frame(
-        struct skippy_session * session,
-        const llama_token * token_ids,
-        size_t token_count,
-        const struct skippy_activation_desc * input_desc,
-        const void * input_payload,
-        struct skippy_activation_desc * output_desc,
-        void * output_payload,
-        size_t output_payload_capacity,
-        size_t * out_output_payload_bytes,
-        llama_token * output_tokens,
-        size_t output_token_capacity,
-        size_t * out_token_count,
-        struct skippy_error ** out_error) {
-    return skippy_verify_tokens_frame_sampled(
-            session,
-            token_ids,
-            token_count,
-            nullptr,
-            input_desc,
-            input_payload,
-            output_desc,
-            output_payload,
-            output_payload_capacity,
-            out_output_payload_bytes,
-            output_tokens,
-            output_token_capacity,
-            out_token_count,
-            out_error);
 }
 
 enum skippy_status skippy_verify_tokens_frame_sampled(

@@ -164,8 +164,6 @@ LLAMA_API struct skippy_abi_version skippy_abi_version(void);
 
 LLAMA_API uint64_t skippy_abi_features(void);
 
-LLAMA_API const char * skippy_status_string(enum skippy_status status);
-
 LLAMA_API void skippy_error_free(struct skippy_error * error);
 
 #ifdef __cplusplus
