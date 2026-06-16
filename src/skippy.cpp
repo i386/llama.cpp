@@ -880,6 +880,9 @@ struct skippy_filter_scope {
             filter.enabled = true;
             filter.layer_start = config->layer_start;
             filter.layer_end = config->layer_end;
+            if (config->include_output && filter.layer_end < std::numeric_limits<int32_t>::max()) {
+                filter.layer_end += 1;
+            }
             filter.include_embeddings = config->include_embeddings;
             filter.include_output = config->include_output;
             llama_model_loader_set_stage_filter(filter);

@@ -1972,9 +1972,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
                 const uint32_t n_embd  = hparams.n_embd_out();
                 float * embd_nextn_out = embd_nextn.data + offset*n_embd;
+                const size_t n_bytes = (size_t) n_rows*n_embd*sizeof(float);
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
-                ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
+                if (n_bytes > ggml_nbytes(t_h_nextn)) {
+                    LLAMA_LOG_ERROR(
+                        "%s: nextn embedding tensor is too small: masked=%d, n_rows=%lld, offset=%lld, "
+                        "n_embd=%u, want=%zu bytes, have=%zu bytes, ne=[%lld, %lld, %lld, %lld], "
+                        "ubatch.n_tokens=%u, n_outputs=%d, n_outputs_prev=%lld, n_tokens_prev=%lld\n",
+                        __func__, (int) masked, (long long) n_rows, (long long) offset,
+                        n_embd, n_bytes, ggml_nbytes(t_h_nextn),
+                        (long long) t_h_nextn->ne[0], (long long) t_h_nextn->ne[1],
+                        (long long) t_h_nextn->ne[2], (long long) t_h_nextn->ne[3],
+                        ubatch.n_tokens, n_outputs, (long long) n_outputs_prev, (long long) n_tokens_prev);
+                    return -3;
+                }
+                ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_bytes);
             }
         }
 
