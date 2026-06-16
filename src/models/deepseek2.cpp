@@ -194,7 +194,9 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
     const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
     const bool stage_filtered = stage_filter.enabled;
     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
-    const int il_end   = stage_filtered ? stage_filter.layer_end   : effective_n_layers;
+    const int il_end   = stage_filtered ?
+            std::min(stage_filter.layer_end, effective_n_layers) :
+            effective_n_layers;
 
     // {n_embd, n_tokens}
     inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);

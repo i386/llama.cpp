@@ -181,6 +181,17 @@ static enum skippy_status skippy_success(skippy_error ** out_error) {
     return SKIPPY_STATUS_OK;
 }
 
+static int32_t skippy_stage_layer_count(const llama_model * model) {
+    if (model == nullptr) {
+        return 0;
+    }
+    const auto & hparams = model->hparams;
+    if (hparams.n_layer_nextn > 0) {
+        return static_cast<int32_t>(hparams.n_layer_all);
+    }
+    return llama_model_n_layer(model);
+}
+
 static enum skippy_backend_device_type skippy_backend_device_type_from_ggml(
         enum ggml_backend_dev_type type) {
     switch (type) {
@@ -2392,7 +2403,7 @@ static enum skippy_status skippy_finish_model_open(
         struct skippy_model ** out_model,
         struct skippy_error ** out_error) {
     if (config != nullptr && config->filter_tensors_on_load) {
-        const int32_t n_layer = llama_model_n_layer(model);
+        const int32_t n_layer = skippy_stage_layer_count(model);
         if (model->arch != LLM_ARCH_LLAMA &&
             model->arch != LLM_ARCH_AFMOE &&
             model->arch != LLM_ARCH_APERTUS &&
@@ -3944,7 +3955,7 @@ static enum skippy_status skippy_validate_state_range(
     const skippy_runtime_config & config = session->stage_model->config;
     const int32_t expected_layer_start = config.filter_tensors_on_load ? config.layer_start : 0;
     const int32_t expected_layer_end = config.filter_tensors_on_load ?
-            config.layer_end : llama_model_n_layer(session->stage_model->model);
+            config.layer_end : skippy_stage_layer_count(session->stage_model->model);
     if (layer_start != expected_layer_start || layer_end != expected_layer_end) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "state range must match the session layer range");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
