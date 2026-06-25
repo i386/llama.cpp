@@ -305,7 +305,8 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
                 indexer_q = ggml_view_4d(ctx0, indexer_q, indexer_q->ne[0], indexer_q->ne[1], indexer_q->ne[2]/n_stream, n_stream, indexer_q->nb[1], indexer_q->nb[2], indexer_q->nb[3]/n_stream, 0);
                 indexer_weights = ggml_view_4d(ctx0, indexer_weights, indexer_weights->ne[0], indexer_weights->ne[1]/n_stream, indexer_weights->ne[2], n_stream, indexer_weights->nb[1], indexer_weights->nb[2]/n_stream, indexer_weights->nb[3]/n_stream, 0);
 
-                indexer_k = ggml_permute(ctx0, indexer_k, 0, 2, 1, 3);
+                // The fused indexer consumes cached K as [head_size, 1, n_kv, n_stream].
+                // Do not apply the dense KQ path's K permutation here.
                 cb(indexer_k, "indexer_k", il);
 
                 ggml_tensor * indexer_score = ggml_lightning_indexer(
