@@ -1464,13 +1464,13 @@ static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * nam
     if (skippy_name_starts_with(name, "indexer_") || skippy_name_starts_with(name, "top_k")) {
         return SKIPPY_GLM_DSA_OP_INDEXER_TOPK;
     }
-    if (std::strcmp(name, "dsa_sparse_mask_fill") == 0) {
+    if (skippy_name_starts_with(name, "dsa_sparse_mask_fill")) {
         return SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL;
     }
-    if (std::strcmp(name, "dsa_sparse_mask_topk") == 0) {
+    if (skippy_name_starts_with(name, "dsa_sparse_mask_topk")) {
         return SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK;
     }
-    if (std::strcmp(name, "dsa_sparse_mask") == 0) {
+    if (skippy_name_starts_with(name, "dsa_sparse_mask")) {
         return SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD;
     }
     if (skippy_name_starts_with(name, "kqv_out")) {
