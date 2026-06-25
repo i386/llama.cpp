@@ -2814,6 +2814,47 @@ template [[host_name("kernel_gated_delta_net_f32_2")]] kernel kernel_gated_delta
 template [[host_name("kernel_gated_delta_net_f32_4")]] kernel kernel_gated_delta_net_t kernel_gated_delta_net_impl<float4, 4>;
 #endif
 
+template<typename K>
+kernel void kernel_lightning_indexer_impl(
+        constant ggml_metal_kargs_lightning_indexer & args,
+        device const char * q,
+        device const char * k,
+        device const char * weights,
+        device       char * dst,
+        uint3 gid[[thread_position_in_grid]]) {
+    const int i_kv     = gid.x;
+    const int i_batch  = gid.y;
+    const int i_stream = gid.z;
+
+    if (i_kv >= args.ne0 || i_batch >= args.ne1 || i_stream >= args.ne3) {
+        return;
+    }
+
+    float score = 0.0f;
+
+    for (int i_head = 0; i_head < args.ne01; ++i_head) {
+        float qk = 0.0f;
+
+        for (int i_embd = 0; i_embd < args.ne00; ++i_embd) {
+            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+            device const K     * k_ptr = (device const K     *) (k + i_embd*args.nb10 + i_kv*args.nb12 + i_stream*args.nb13);
+
+            qk += *q_ptr * float(*k_ptr);
+        }
+
+        device const float * weight_ptr = (device const float *) (weights + i_head*args.nb20 + i_batch*args.nb21 + i_stream*args.nb23);
+        score += max(qk * args.scale_embd, 0.0f) * *weight_ptr;
+    }
+
+    device float * dst_ptr = (device float *) (dst + i_kv*args.nb0 + i_batch*args.nb1 + i_stream*args.nb3);
+    *dst_ptr = score * args.scale_heads;
+}
+
+typedef decltype(kernel_lightning_indexer_impl<float>) kernel_lightning_indexer_t;
+
+template [[host_name("kernel_lightning_indexer_f32")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<float>;
+template [[host_name("kernel_lightning_indexer_f16")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<half>;
+
 constant short FC_solve_tri_nsg [[function_constant(FC_SOLVE_TRI + 0)]];
 constant short FC_solve_tri_n   [[function_constant(FC_SOLVE_TRI + 1)]];
 constant short FC_solve_tri_k   [[function_constant(FC_SOLVE_TRI + 2)]];
