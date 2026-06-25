@@ -280,30 +280,13 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
                 indexer_q = ggml_view_4d(ctx0, indexer_q, indexer_q->ne[0], indexer_q->ne[1], indexer_q->ne[2]/n_stream, n_stream, indexer_q->nb[1], indexer_q->nb[2], indexer_q->nb[3]/n_stream, 0);
                 indexer_weights = ggml_view_4d(ctx0, indexer_weights, indexer_weights->ne[0], indexer_weights->ne[1]/n_stream, indexer_weights->ne[2], n_stream, indexer_weights->nb[1], indexer_weights->nb[2]/n_stream, indexer_weights->nb[3]/n_stream, 0);
 
-                indexer_q = ggml_permute(ctx0, indexer_q, 0, 2, 1, 3);
-                cb(indexer_q, "indexer_q", il);
                 indexer_k = ggml_permute(ctx0, indexer_k, 0, 2, 1, 3);
                 cb(indexer_k, "indexer_k", il);
 
-                ggml_tensor * indexer_kq = ggml_mul_mat(ctx0, indexer_k, indexer_q);
-                cb(indexer_kq, "indexer_kq", il);
-
-                indexer_kq = ggml_cont(ctx0, ggml_permute(ctx0, indexer_kq, 2, 1, 0, 3));
-                cb(indexer_kq, "indexer_kq", il);
-
-                ggml_tensor * indexer_score = ggml_relu(ctx0, indexer_kq);
-                cb(indexer_score, "indexer_score", il);
-
-                indexer_weights = ggml_scale(ctx0, indexer_weights, 1.0f / sqrtf(float(n_embd_indexer_head * n_indexer_head)));
-                cb(indexer_weights, "indexer_weights", il);
-
-                indexer_score = ggml_mul(ctx0, indexer_score, indexer_weights);
-                cb(indexer_score, "indexer_score", il);
-
-                indexer_score = ggml_sum_rows(ctx0, indexer_score);
-                cb(indexer_score, "indexer_score", il);
-
-                indexer_score = ggml_cont(ctx0, ggml_permute(ctx0, indexer_score, 2, 1, 0, 3));
+                ggml_tensor * indexer_score = ggml_lightning_indexer(
+                    ctx0, indexer_q, indexer_k, indexer_weights,
+                    1.0f / sqrtf(float(n_embd_indexer_head)),
+                    1.0f / sqrtf(float(n_indexer_head)));
                 cb(indexer_score, "indexer_score", il);
 
                 ggml_tensor * indexer_kq_mask = inp_attn_dsa->get_kq_mask_lid();

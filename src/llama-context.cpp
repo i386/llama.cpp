@@ -598,6 +598,35 @@ void llama_context::sched_reserve() {
         cparams.auto_fgdn = false;
     }
 
+    if (model.arch == LLM_ARCH_GLM_DSA) {
+        LLAMA_LOG_INFO("%s: resolving GLM-DSA lightning indexer support:\n", __func__);
+
+        auto * gf = graph_reserve(1, n_seqs, n_outputs, mctx.get(), true);
+        if (!gf) {
+            throw std::runtime_error("failed to reserve graph for GLM-DSA lightning indexer check");
+        }
+
+        const size_t prefix_len = strlen("indexer_score") + 1;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+            ggml_tensor * n = ggml_graph_node(gf, i);
+            if (n->op != GGML_OP_LIGHTNING_INDEXER) {
+                continue;
+            }
+
+            GGML_ASSERT(strncmp(n->name, "indexer_score-", prefix_len) == 0);
+            const int il = std::stoi(n->name + prefix_len);
+            ggml_backend_dev_t device_layer = model.dev_layer(il);
+            ggml_backend_dev_t device_lid =
+                ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched.get(), n));
+            if (device_lid != device_layer) {
+                throw std::runtime_error(format(
+                    "%s: layer %d is assigned to device %s but GLM-DSA lightning indexer "
+                    "is assigned to device %s; backend support is required to avoid CPU fallback",
+                    __func__, il, ggml_backend_dev_name(device_layer), ggml_backend_dev_name(device_lid)));
+            }
+        }
+    }
+
     // reserve worst-case graph
     int n_splits_pp = -1;
     int n_nodes_pp  = -1;
