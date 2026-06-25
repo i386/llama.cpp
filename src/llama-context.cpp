@@ -598,7 +598,12 @@ void llama_context::sched_reserve() {
         cparams.auto_fgdn = false;
     }
 
-    if (model.arch == LLM_ARCH_GLM_DSA) {
+    const char * LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER = getenv("LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER");
+    const bool glm_dsa_disable_lightning_indexer =
+            LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER && atoi(LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER) != 0;
+    if (model.arch == LLM_ARCH_GLM_DSA && glm_dsa_disable_lightning_indexer) {
+        LLAMA_LOG_WARN("%s: GLM-DSA lightning indexer disabled by LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER\n", __func__);
+    } else if (model.arch == LLM_ARCH_GLM_DSA) {
         LLAMA_LOG_INFO("%s: resolving GLM-DSA lightning indexer support:\n", __func__);
 
         auto * gf = graph_reserve(1, n_seqs, n_outputs, mctx.get(), true);
