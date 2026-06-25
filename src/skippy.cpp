@@ -45,11 +45,13 @@ using json = nlohmann::ordered_json;
 
 enum skippy_glm_dsa_op_kind {
     SKIPPY_GLM_DSA_OP_INDEXER_TOPK = 0,
-    SKIPPY_GLM_DSA_OP_SPARSE_MASK = 1,
-    SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 2,
-    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 3,
-    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 4,
-    SKIPPY_GLM_DSA_OP_COUNT = 5,
+    SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL = 1,
+    SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK = 2,
+    SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD = 3,
+    SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 4,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 5,
+    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 6,
+    SKIPPY_GLM_DSA_OP_COUNT = 7,
     SKIPPY_GLM_DSA_OP_UNKNOWN = 255,
 };
 
@@ -1439,8 +1441,12 @@ static const char * skippy_glm_dsa_op_name(skippy_glm_dsa_op_kind kind) {
     switch (kind) {
         case SKIPPY_GLM_DSA_OP_INDEXER_TOPK:
             return "indexer_topk";
-        case SKIPPY_GLM_DSA_OP_SPARSE_MASK:
-            return "sparse_mask";
+        case SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL:
+            return "sparse_mask_fill";
+        case SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK:
+            return "sparse_mask_topk";
+        case SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD:
+            return "sparse_mask_add";
         case SKIPPY_GLM_DSA_OP_MLA_ATTENTION:
             return "mla_attention";
         case SKIPPY_GLM_DSA_OP_ROUTED_MOE:
@@ -1458,8 +1464,14 @@ static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * nam
     if (skippy_name_starts_with(name, "indexer_") || skippy_name_starts_with(name, "top_k")) {
         return SKIPPY_GLM_DSA_OP_INDEXER_TOPK;
     }
-    if (skippy_name_starts_with(name, "dsa_sparse_mask")) {
-        return SKIPPY_GLM_DSA_OP_SPARSE_MASK;
+    if (std::strcmp(name, "dsa_sparse_mask_fill") == 0) {
+        return SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL;
+    }
+    if (std::strcmp(name, "dsa_sparse_mask_topk") == 0) {
+        return SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK;
+    }
+    if (std::strcmp(name, "dsa_sparse_mask") == 0) {
+        return SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD;
     }
     if (skippy_name_starts_with(name, "kqv_out")) {
         return SKIPPY_GLM_DSA_OP_MLA_ATTENTION;
@@ -1499,6 +1511,32 @@ static bool skippy_glm_dsa_op_timing_cb(ggml_tensor * tensor, bool ask, void * u
     return true;
 }
 
+static skippy_glm_dsa_op_stat skippy_glm_dsa_sparse_mask_stat(const skippy_glm_dsa_op_timing & timing) {
+    skippy_glm_dsa_op_stat stat = {};
+    stat.nodes += timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL].nodes;
+    stat.nodes += timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK].nodes;
+    stat.nodes += timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD].nodes;
+    stat.elapsed_us += timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL].elapsed_us;
+    stat.elapsed_us += timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK].elapsed_us;
+    stat.elapsed_us += timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD].elapsed_us;
+    return stat;
+}
+
+static void skippy_glm_dsa_print_op_stat(const char * name, const skippy_glm_dsa_op_stat & stat) {
+    std::fprintf(stderr,
+            " %s_nodes=%llu %s_us=%lld",
+            name,
+            static_cast<unsigned long long>(stat.nodes),
+            name,
+            static_cast<long long>(stat.elapsed_us));
+}
+
+static void skippy_glm_dsa_print_op_kind(
+        skippy_glm_dsa_op_kind kind,
+        const skippy_glm_dsa_op_stat & stat) {
+    skippy_glm_dsa_print_op_stat(skippy_glm_dsa_op_name(kind), stat);
+}
+
 static void skippy_glm_dsa_op_timing_begin(skippy_session * session, size_t token_count) {
     if (session == nullptr || session->stage_model == nullptr || !session->stage_model->glm_dsa_timing.enabled) {
         return;
@@ -1533,15 +1571,14 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
             timing.stage_index,
             timing.token_count,
             static_cast<long long>(total_us));
-    for (int i = 0; i < SKIPPY_GLM_DSA_OP_COUNT; ++i) {
-        const skippy_glm_dsa_op_stat & stat = timing.stats[i];
-        std::fprintf(stderr,
-                " %s_nodes=%llu %s_us=%lld",
-                skippy_glm_dsa_op_name(static_cast<skippy_glm_dsa_op_kind>(i)),
-                static_cast<unsigned long long>(stat.nodes),
-                skippy_glm_dsa_op_name(static_cast<skippy_glm_dsa_op_kind>(i)),
-                static_cast<long long>(stat.elapsed_us));
-    }
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_INDEXER_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_INDEXER_TOPK]);
+    skippy_glm_dsa_print_op_stat("sparse_mask", skippy_glm_dsa_sparse_mask_stat(timing));
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_MLA_ATTENTION, timing.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_ROUTED_MOE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SHARED_EXPERT, timing.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
     std::fprintf(stderr, "\n");
 }
 
