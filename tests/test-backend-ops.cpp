@@ -3923,6 +3923,57 @@ struct test_gated_delta_net : public test_case {
     }
 };
 
+// GGML_OP_LIGHTNING_INDEXER
+struct test_lightning_indexer : public test_case {
+    const ggml_type type_k;
+
+    const int64_t head_count;
+    const int64_t head_size;
+    const int64_t n_batch;
+    const int64_t n_kv;
+    const int64_t n_stream;
+
+    std::string vars() override {
+        return VARS_TO_STR6(type_k, head_count, head_size, n_batch, n_kv, n_stream);
+    }
+
+    test_lightning_indexer(ggml_type type_k = GGML_TYPE_F32,
+            int64_t head_count = 4, int64_t head_size = 16, int64_t n_batch = 2,
+            int64_t n_kv = 33, int64_t n_stream = 1)
+        : type_k(type_k), head_count(head_count), head_size(head_size), n_batch(n_batch),
+          n_kv(n_kv), n_stream(n_stream) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_size, head_count, n_batch, n_stream);
+        ggml_tensor * k = ggml_new_tensor_4d(ctx, type_k,         head_size, 1,          n_kv,    n_stream);
+        ggml_tensor * w = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_count, n_batch,   1,       n_stream);
+
+        ggml_set_name(q, "q");
+        ggml_set_name(k, "k");
+        ggml_set_name(w, "weights");
+
+        ggml_tensor * out = ggml_lightning_indexer(ctx, q, k, w,
+                1.0f/sqrtf(float(head_size)),
+                1.0f/sqrtf(float(head_count)));
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "q") == 0 || strcmp(t->name, "k") == 0 || strcmp(t->name, "weights") == 0) {
+                init_tensor_uniform(t, 0.01f, 1.0f);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+
+    double max_nmse_err() override {
+        return type_k == GGML_TYPE_F16 ? 1e-6 : 1e-7;
+    }
+};
+
 // GGML_OP_GATED_LINEAR_ATTN
 struct test_gla : public test_case {
     const ggml_type type;
@@ -9163,6 +9214,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F32, 4, 16, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 4, 16, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 8, 32, 4, 65, 2));
 
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));
