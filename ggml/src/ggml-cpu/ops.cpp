@@ -10862,6 +10862,72 @@ void ggml_compute_forward_lightning_indexer(
     }
 }
 
+// ggml_compute_forward_dsa_sparse_mask
+
+void ggml_compute_forward_dsa_sparse_mask(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0]; // kq_mask rows: [1, n_kv, n_batch, n_stream]
+    const ggml_tensor * src1 = dst->src[1]; // top_k
+
+    GGML_ASSERT(dst->type == src0->type);
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
+    GGML_ASSERT(src1->type == GGML_TYPE_I32);
+    GGML_ASSERT(dst->ne[0] == src0->ne[0]);
+    GGML_ASSERT(dst->ne[1] == src0->ne[1]);
+    GGML_ASSERT(dst->ne[2] == src0->ne[2]);
+    GGML_ASSERT(dst->ne[3] == src0->ne[3]);
+    GGML_ASSERT(src0->ne[0] == 1);
+    GGML_ASSERT(src1->ne[1] == src0->ne[2]);
+    GGML_ASSERT(src0->ne[3] % src1->ne[2] == 0);
+    GGML_ASSERT(src1->ne[3] == 1);
+
+    const int64_t n_kv     = src0->ne[1];
+    const int64_t n_batch  = src0->ne[2];
+    const int64_t n_stream = src0->ne[3];
+    const int64_t n_top_k  = src1->ne[0];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t total = n_batch * n_stream;
+    const int64_t dr    = (total + nth - 1) / nth;
+    const int64_t i0    = dr * ith;
+    const int64_t i1    = MIN(i0 + dr, total);
+
+    for (int64_t i = i0; i < i1; ++i) {
+        const int64_t i_batch  = i % n_batch;
+        const int64_t i_stream = i / n_batch;
+
+        for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
+            char * dst_data = (char *) dst->data + i_kv * dst->nb[1] + i_batch * dst->nb[2] + i_stream * dst->nb[3];
+
+            if (dst->type == GGML_TYPE_F32) {
+                *(float *) dst_data = -INFINITY;
+            } else {
+                *(ggml_fp16_t *) dst_data = GGML_CPU_FP32_TO_FP16(-INFINITY);
+            }
+        }
+
+        const int64_t i12 = i_stream % src1->ne[2];
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            const char * top_k_data =
+                (const char *) src1->data + i_top * src1->nb[0] + i_batch * src1->nb[1] + i12 * src1->nb[2];
+            const int32_t i_kv = *(const int32_t *) top_k_data;
+            GGML_ASSERT(i_kv >= 0 && i_kv < n_kv);
+
+            const char * src = (const char *) src0->data + i_kv * src0->nb[1] + i_batch * src0->nb[2] + i_stream * src0->nb[3];
+            char * dst_data = (char *) dst->data + i_kv * dst->nb[1] + i_batch * dst->nb[2] + i_stream * dst->nb[3];
+
+            if (dst->type == GGML_TYPE_F32) {
+                *(float *) dst_data = *(const float *) src;
+            } else {
+                *(ggml_fp16_t *) dst_data = *(const ggml_fp16_t *) src;
+            }
+        }
+    }
+}
+
 // ggml_compute_forward_rwkv_wkv7
 
 static void ggml_compute_forward_rwkv_wkv7_f32(

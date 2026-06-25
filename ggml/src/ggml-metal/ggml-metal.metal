@@ -9426,6 +9426,60 @@ kernel void kernel_set_rows_f(
     }
 }
 
+kernel void kernel_dsa_sparse_mask_fill(
+        constant ggml_metal_kargs_dsa_sparse_mask & args,
+        device             char                   * dst,
+        uint3                                       tgpig[[threadgroup_position_in_grid]],
+        uint                                        tiitg[[thread_index_in_threadgroup]],
+        uint3                                       tptg [[threads_per_threadgroup]]) {
+    const int32_t i_kv = tgpig.x*tptg.x + tiitg;
+    if (i_kv >= args.n_kv) {
+        return;
+    }
+
+    const int32_t i_batch  = tgpig.y;
+    const int32_t i_stream = tgpig.z;
+
+    device char * dst_ptr = dst + i_kv*args.nb1 + i_batch*args.nb2 + i_stream*args.nb3;
+    if (args.elem_size == 2) {
+        ((device half *) dst_ptr)[0] = (half) -INFINITY;
+    } else {
+        ((device float *) dst_ptr)[0] = -INFINITY;
+    }
+}
+
+kernel void kernel_dsa_sparse_mask_set(
+        constant ggml_metal_kargs_dsa_sparse_mask & args,
+        device const       char                   * kq_mask,
+        device const       int32_t                * top_k,
+        device             char                   * dst,
+        uint3                                       tgpig[[threadgroup_position_in_grid]],
+        uint                                        tiitg[[thread_index_in_threadgroup]],
+        uint3                                       tptg [[threads_per_threadgroup]]) {
+    const int32_t i_top = tgpig.x*tptg.x + tiitg;
+    if (i_top >= args.n_top_k) {
+        return;
+    }
+
+    const int32_t i_batch  = tgpig.y;
+    const int32_t i_stream = tgpig.z;
+    const int32_t i12      = i_stream%args.n_top_stream;
+    const int32_t i_kv     = ((device const int32_t *) ((device const char *) top_k + i_top*args.nb10 + i_batch*args.nb11 + i12*args.nb12))[0];
+
+    if (i_kv < 0 || i_kv >= args.n_kv) {
+        return;
+    }
+
+    const device char * src_ptr = kq_mask + i_kv*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03;
+          device char * dst_ptr = dst     + i_kv*args.nb1  + i_batch*args.nb2  + i_stream*args.nb3;
+
+    if (args.elem_size == 2) {
+        ((device half *) dst_ptr)[0] = ((const device half *) src_ptr)[0];
+    } else {
+        ((device float *) dst_ptr)[0] = ((const device float *) src_ptr)[0];
+    }
+}
+
 kernel void kernel_diag_f32(
         constant ggml_metal_kargs_diag & args,
         device   const char * src0,

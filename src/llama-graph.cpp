@@ -25,6 +25,11 @@ static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
 static thread_local skippy_activation_gemma3n_altup g_skippy_gemma3n_altup;
 static thread_local skippy_activation_glm_dsa_top_k g_skippy_glm_dsa_top_k;
 
+static bool skippy_glm_dsa_fused_sparse_mask_enabled() {
+    const char * value = getenv("SKIPPY_GLM_DSA_ENABLE_FUSED_SPARSE_MASK");
+    return value != nullptr && strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
+}
+
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
     g_skippy_graph_filter = filter;
 }
@@ -2671,31 +2676,36 @@ ggml_tensor * llm_graph_context::build_attn(
 
     const auto & kq_mask = inp->get_kq_mask_mla();
 
-    // prepare new kq mask - starts filled with -INFINITY
-    ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
-    cb(kq_mask_all, "dsa_sparse_mask_fill", il);
-
     // reshape KQ mask into tensor with rows of size 1:
     // [n_kv, n_batch, 1, n_stream] -> [1, n_kv, n_batch, n_stream]
-    kq_mask_all = ggml_view_4d(ctx0, kq_mask_all, 1, kq_mask_all->ne[0], kq_mask_all->ne[1], kq_mask_all->ne[3], kq_mask_all->nb[0], kq_mask_all->nb[1], kq_mask_all->nb[2], 0);
-
-    // reshape top_k indices: [n_top_k, n_batch, 1, n_stream] -> [n_top_k, n_batch, n_stream, 1]
-    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[2], top_k->ne[3]*top_k->nb[3], 0);
-
-    // gather causal mask values for the top-k indices:
-    // ggml_get_rows([1, n_kv, n_batch, n_stream], [n_top_k, n_batch, n_stream, 1])
-    //   -> [1, n_top_k, n_batch, n_stream]
     ggml_tensor * kq_mask_rows = ggml_view_4d(
             ctx0, kq_mask,
             1, kq_mask->ne[0], kq_mask->ne[1], kq_mask->ne[3],
             kq_mask->nb[0], kq_mask->nb[1], kq_mask->nb[2], 0);
-    ggml_tensor * kq_mask_top_k_values = ggml_get_rows(ctx0, kq_mask_rows, top_k_3d);
-    cb(kq_mask_top_k_values, "dsa_sparse_mask_topk", il);
 
-    // modify KQ mask by copying causal mask values into elements that are in top_k indices
-    // ggml_set_rows([1, n_kv, n_batch, n_stream], [1, n_top_k, n_batch, n_stream], [n_top_k, n_batch, n_stream, 1])
-    ggml_tensor * kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, kq_mask_top_k_values, top_k_3d);
-    cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
+    // reshape top_k indices: [n_top_k, n_batch, 1, n_stream] -> [n_top_k, n_batch, n_stream, 1]
+    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[3], top_k->nb[2], 0);
+
+    ggml_tensor * kq_mask_top_k = nullptr;
+    if (skippy_glm_dsa_fused_sparse_mask_enabled()) {
+        kq_mask_top_k = ggml_dsa_sparse_mask(ctx0, kq_mask_rows, top_k_3d);
+        cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
+    } else {
+        // prepare new kq mask - starts filled with -INFINITY
+        ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
+        cb(kq_mask_all, "dsa_sparse_mask_fill", il);
+
+        kq_mask_all = ggml_view_4d(
+                ctx0, kq_mask_all,
+                1, kq_mask_all->ne[0], kq_mask_all->ne[1], kq_mask_all->ne[3],
+                kq_mask_all->nb[0], kq_mask_all->nb[1], kq_mask_all->nb[2], 0);
+
+        ggml_tensor * kq_mask_top_k_values = ggml_get_rows(ctx0, kq_mask_rows, top_k_3d);
+        cb(kq_mask_top_k_values, "dsa_sparse_mask_topk", il);
+
+        kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, kq_mask_top_k_values, top_k_3d);
+        cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
+    }
 
     // reshape to restore the original shape of KQ mask:
     // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]

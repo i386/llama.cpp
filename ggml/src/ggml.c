@@ -1065,6 +1065,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SOLVE_TRI",
     "GATED_DELTA_NET",
     "LIGHTNING_INDEXER",
+    "DSA_SPARSE_MASK",
 
     "UNARY",
 
@@ -1082,7 +1083,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
+static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1177,6 +1178,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "A X = B, A triangular, solve X",
     "gated_delta_net(q, k, v, g, beta, s)",
     "lightning_indexer(q, k, weights, scale_embd, scale_heads)",
+    "dsa_sparse_mask(kq_mask, top_k)",
 
     "unary(x)",
 
@@ -1194,7 +1196,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
+static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6303,6 +6305,30 @@ struct ggml_tensor * ggml_lightning_indexer(
     result->src[0] = q;
     result->src[1] = k;
     result->src[2] = weights;
+
+    return result;
+}
+
+// ggml_dsa_sparse_mask
+
+struct ggml_tensor * ggml_dsa_sparse_mask(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * kq_mask_rows,
+        struct ggml_tensor  * top_k) {
+
+    GGML_ASSERT(kq_mask_rows->type == GGML_TYPE_F32 || kq_mask_rows->type == GGML_TYPE_F16);
+    GGML_ASSERT(top_k->type == GGML_TYPE_I32);
+    GGML_ASSERT(kq_mask_rows->ne[0] == 1);
+    GGML_ASSERT(kq_mask_rows->ne[2] == top_k->ne[1]);
+    GGML_ASSERT(kq_mask_rows->ne[3] % top_k->ne[2] == 0);
+    GGML_ASSERT(top_k->ne[3] == 1);
+
+    int64_t ne[4] = { kq_mask_rows->ne[0], kq_mask_rows->ne[1], kq_mask_rows->ne[2], kq_mask_rows->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, kq_mask_rows->type, 4, ne);
+
+    result->op     = GGML_OP_DSA_SPARSE_MASK;
+    result->src[0] = kq_mask_rows;
+    result->src[1] = top_k;
 
     return result;
 }

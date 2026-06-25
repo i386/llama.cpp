@@ -1267,6 +1267,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->src[2]->ne[2] == 1 &&
                    op->src[0]->ne[3] == op->src[1]->ne[3] &&
                    op->src[1]->ne[3] == op->src[2]->ne[3];
+        case GGML_OP_DSA_SPARSE_MASK:
+            return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16) &&
+                   op->src[0]->type == op->type &&
+                   op->src[1]->type == GGML_TYPE_I32 &&
+                   op->src[0]->ne[0] == 1 &&
+                   op->src[0]->ne[2] == op->src[1]->ne[1] &&
+                   op->src[0]->ne[3] % op->src[1]->ne[2] == 0 &&
+                   op->src[1]->ne[3] == 1 &&
+                   op->ne[0] == op->src[0]->ne[0] &&
+                   op->ne[1] == op->src[0]->ne[1] &&
+                   op->ne[2] == op->src[0]->ne[2] &&
+                   op->ne[3] == op->src[0]->ne[3];
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:

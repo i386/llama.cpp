@@ -3974,6 +3974,143 @@ struct test_lightning_indexer : public test_case {
     }
 };
 
+// GGML_OP_DSA_SPARSE_MASK
+struct test_dsa_sparse_mask : public test_case {
+    const ggml_type type;
+
+    const int64_t n_kv;
+    const int64_t n_batch;
+    const int64_t n_stream;
+    const int64_t n_top_k;
+    const int64_t n_top_stream;
+
+    std::string vars() override {
+        return VARS_TO_STR6(type, n_kv, n_batch, n_stream, n_top_k, n_top_stream);
+    }
+
+    test_dsa_sparse_mask(ggml_type type = GGML_TYPE_F16,
+            int64_t n_kv = 33, int64_t n_batch = 2, int64_t n_stream = 1,
+            int64_t n_top_k = 4, int64_t n_top_stream = 1)
+        : type(type), n_kv(n_kv), n_batch(n_batch), n_stream(n_stream),
+          n_top_k(n_top_k), n_top_stream(n_top_stream) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * kq_mask = ggml_new_tensor_4d(ctx, type, 1, n_kv, n_batch, n_stream);
+        ggml_tensor * top_k   = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, n_top_k, n_batch, n_top_stream, 1);
+
+        ggml_set_name(kq_mask, "kq_mask");
+        ggml_set_name(top_k,   "top_k");
+
+        ggml_tensor * out = ggml_dsa_sparse_mask(ctx, kq_mask, top_k);
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "kq_mask") == 0) {
+                init_kq_mask(t);
+            } else if (strcmp(t->name, "top_k") == 0) {
+                init_top_k(t);
+            } else if (!ggml_is_view_op(t->op)) {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+
+    double err(const float * a, const float * b, size_t n) override {
+        if (n != (size_t) (n_kv * n_batch * n_stream)) {
+            return 1.0;
+        }
+
+        double err = 0.0;
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
+                    const size_t idx = (i_stream*n_batch + i_batch)*n_kv + i_kv;
+                    const float expected = expected_value(i_kv, i_batch, i_stream);
+
+                    err = std::max(err, value_err(a[idx], expected));
+                    err = std::max(err, value_err(b[idx], expected));
+                }
+            }
+        }
+        return err;
+    }
+
+    double max_err(ggml_backend_t backend) override {
+        (void) backend;
+        return type == GGML_TYPE_F16 ? 1e-3 : 0.0;
+    }
+
+    bool run_whole_graph() override {
+        return true;
+    }
+
+private:
+    void init_kq_mask(ggml_tensor * t) const {
+        std::vector<float> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
+                    const size_t idx = (i_stream*n_batch + i_batch)*n_kv + i_kv;
+                    data[idx] = mask_value(i_kv, i_batch, i_stream);
+                }
+            }
+        }
+
+        if (type == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> data_f16(data.size());
+            ggml_fp32_to_fp16_row(data.data(), data_f16.data(), data.size());
+            ggml_backend_tensor_set(t, data_f16.data(), 0, data_f16.size()*sizeof(ggml_fp16_t));
+        } else {
+            ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
+        }
+    }
+
+    void init_top_k(ggml_tensor * t) const {
+        std::vector<int32_t> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_top_stream; ++i_stream) {
+            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+                    const size_t idx = (i_stream*n_batch + i_batch)*n_top_k + i_top;
+                    data[idx] = top_k_index(i_top, i_batch, i_stream);
+                }
+            }
+        }
+        ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
+    }
+
+    int32_t top_k_index(int64_t i_top, int64_t i_batch, int64_t i_stream) const {
+        return (int32_t) ((i_top*7 + i_batch*3 + i_stream*5) % n_kv);
+    }
+
+    bool is_selected(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
+        const int64_t i_top_stream = i_stream % n_top_stream;
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            if (top_k_index(i_top, i_batch, i_top_stream) == i_kv) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    float mask_value(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
+        return 0.01f*(float) (1 + i_kv + 10*i_batch + 100*i_stream);
+    }
+
+    float expected_value(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
+        return is_selected(i_kv, i_batch, i_stream) ? mask_value(i_kv, i_batch, i_stream) : -INFINITY;
+    }
+
+    static double value_err(float actual, float expected) {
+        if (std::isinf(expected)) {
+            return std::isinf(actual) && std::signbit(actual) == std::signbit(expected) ? 0.0 : 1.0;
+        }
+        return actual == expected ? 0.0 : std::abs((double) actual - (double) expected);
+    }
+};
+
 // GGML_OP_GATED_LINEAR_ATTN
 struct test_gla : public test_case {
     const ggml_type type;
@@ -9218,6 +9355,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F32, 4, 16, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 4, 16, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 8, 32, 4, 65, 2));
+    test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F32, 33, 2, 1, 4, 1));
+    test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 33, 2, 1, 4, 1));
+    test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 65, 4, 2, 8, 2));
 
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));

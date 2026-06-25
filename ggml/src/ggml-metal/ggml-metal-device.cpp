@@ -176,6 +176,30 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_set_rows(ggml_me
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_dsa_sparse_mask_fill(ggml_metal_library_t lib) {
+    const char * base = "kernel_dsa_sparse_mask_fill";
+    const char * name = "kernel_dsa_sparse_mask_fill";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+    }
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_dsa_sparse_mask_set(ggml_metal_library_t lib) {
+    const char * base = "kernel_dsa_sparse_mask_set";
+    const char * name = "kernel_dsa_sparse_mask_set";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_diag(ggml_metal_library_t lib, const ggml_tensor * op) {
     char base[256];
     char name[256];

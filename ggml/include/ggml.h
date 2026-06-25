@@ -569,6 +569,7 @@ extern "C" {
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_LIGHTNING_INDEXER,
+        GGML_OP_DSA_SPARSE_MASK,
 
         GGML_OP_UNARY,
 
@@ -2581,6 +2582,11 @@ extern "C" {
             struct ggml_tensor  * weights,
             float                 scale_embd,
             float                 scale_heads);
+
+    GGML_API struct ggml_tensor * ggml_dsa_sparse_mask(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * kq_mask,
+            struct ggml_tensor  * top_k);
 
     // custom operators
 

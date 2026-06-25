@@ -341,6 +341,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_lightning_indexer(ctx, idx);
             } break;
+        case GGML_OP_DSA_SPARSE_MASK:
+            {
+                n_fuse = ggml_metal_op_dsa_sparse_mask(ctx, idx);
+            } break;
         case GGML_OP_SOLVE_TRI:
             {
                 n_fuse = ggml_metal_op_solve_tri(ctx, idx);
@@ -4406,6 +4410,64 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
 
     const int nth = std::min(64, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
     ggml_metal_encoder_dispatch_threadgroups(enc, (ne0 + nth - 1)/nth, ne1, ne3, nth, 1, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_dsa_sparse_mask(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
+    GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb1, op->src[1], nb);
+    GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
+
+    ggml_metal_kargs_dsa_sparse_mask args = {
+        /*.n_kv     =*/ ne01,
+        /*.n_batch  =*/ ne02,
+        /*.n_stream =*/ ne03,
+        /*.n_top_k  =*/ ne10,
+        /*.n_top_stream =*/ ne12,
+        /*.elem_size =*/ (int32_t) ggml_type_size(op->type),
+        /*._pad1    =*/ 0,
+        /*._pad2    =*/ 0,
+        /*.nb01     =*/ nb01,
+        /*.nb02     =*/ nb02,
+        /*.nb03     =*/ nb03,
+        /*.nb10     =*/ nb10,
+        /*.nb11     =*/ nb11,
+        /*.nb12     =*/ nb12,
+        /*.nb0      =*/ nb0,
+        /*.nb1      =*/ nb1,
+        /*.nb2      =*/ nb2,
+        /*.nb3      =*/ nb3,
+    };
+
+    auto pipeline_fill = ggml_metal_library_get_pipeline_dsa_sparse_mask_fill(lib);
+    auto pipeline_set  = ggml_metal_library_get_pipeline_dsa_sparse_mask_set(lib);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline_fill);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),          0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op), 1);
+
+    const int nth_fill = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline_fill));
+    ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nth_fill - 1)/nth_fill, ne02, ne03, nth_fill, 1, 1);
+
+    ggml_metal_op_concurrency_reset(ctx);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline_set);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),                  0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+
+    const int nth_set = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline_set));
+    ggml_metal_encoder_dispatch_threadgroups(enc, (ne10 + nth_set - 1)/nth_set, ne11, ne03, nth_set, 1, 1);
 
     return 1;
 }

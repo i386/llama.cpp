@@ -985,6 +985,27 @@ typedef struct {
 } ggml_metal_kargs_set_rows;
 
 typedef struct {
+    int32_t  n_kv;
+    int32_t  n_batch;
+    int32_t  n_stream;
+    int32_t  n_top_k;
+    int32_t  n_top_stream;
+    int32_t  elem_size;
+    int32_t  _pad1;
+    int32_t  _pad2;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb0;
+    uint64_t nb1;
+    uint64_t nb2;
+    uint64_t nb3;
+} ggml_metal_kargs_dsa_sparse_mask;
+
+typedef struct {
     int32_t  ne00;
     int32_t  ne01;
     int32_t  ne02;
