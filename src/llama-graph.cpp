@@ -2628,6 +2628,7 @@ ggml_tensor * llm_graph_context::build_attn(
 
     // prepare new kq mask - starts filled with -INFINITY
     ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
+    cb(kq_mask_all, "dsa_sparse_mask_fill", il);
 
     // reshape KQ mask into tensor with rows of size 1:
     // [n_kv, n_batch, 1, n_stream] -> [1, n_kv, n_batch, n_stream]
@@ -2644,6 +2645,7 @@ ggml_tensor * llm_graph_context::build_attn(
     // modify KQ mask by unmasking elements that are in top_k indices
     // ggml_set_rows([1, n_kv, n_batch, n_stream], [1, n_top_k, n_batch, n_stream], [n_top_k, n_batch, n_stream, 1])
     ggml_tensor * kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, zeros, top_k_3d);
+    cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
 
     // reshape to restore the original shape of KQ mask:
     // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]
@@ -2651,6 +2653,7 @@ ggml_tensor * llm_graph_context::build_attn(
 
     // combine with the original kq mask
     kq_mask_top_k = ggml_add(ctx0, kq_mask_top_k, kq_mask);
+    cb(kq_mask_top_k, "dsa_sparse_mask", il);
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
