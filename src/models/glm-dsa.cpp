@@ -220,6 +220,21 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
     ggml_tensor * last_top_k = nullptr;
 
+    if (stage_filtered && il_start > 0 && il_start < effective_n_layers && !llama_glm_dsa_layer_has_indexer(model.layers[il_start])) {
+        const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
+        GGML_ASSERT(n_stream > 0);
+        GGML_ASSERT(ubatch.n_tokens % n_stream == 0);
+        const int64_t n_batch = ubatch.n_tokens / n_stream;
+        const int64_t n_top_k = std::min<int64_t>(inp_attn_dsa->mctx->get_lid()->get_n_kv(), n_indexer_top_k);
+
+        auto inp = std::make_unique<llm_graph_input_glm_dsa_top_k>(n_top_k, n_stream);
+        inp->values = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32, n_top_k, n_batch, 1, n_stream);
+        cb(inp->values, "inp_glm_dsa_top_k", -1);
+        ggml_set_input(inp->values);
+        last_top_k = inp->values;
+        res->add_input(std::move(inp));
+    }
+
     for (int il = il_start; il < il_end; ++il) {
         ggml_tensor * inpSA = inpL;
 
@@ -324,7 +339,7 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
                 cb(top_k, "top_k", il);
                 last_top_k = top_k;
             } else if (!top_k) {
-                throw std::runtime_error("GLM_DSA split starts inside an IndexShare consumer group without top-k sideband");
+                throw std::runtime_error("GLM_DSA split starts inside an IndexShare consumer group without top-k sideband input");
             }
 
             ggml_tensor * q = ggml_mul_mat(ctx0, model.layers[il].wq_b, qr);
@@ -447,6 +462,10 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
         inpL = cur;
     }
     cur = inpL;
+
+    if (stage_filtered && stage_filter.layer_end < effective_n_layers && last_top_k != nullptr) {
+        res->t_skippy_glm_dsa_top_k = last_top_k;
+    }
 
     if (stage_filtered && !stage_filter.include_output) {
         if (!cparams.embeddings_nextn_masked && inp_out_ids) {

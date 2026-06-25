@@ -54,6 +54,13 @@ struct skippy_activation_gemma3n_altup {
     uint32_t n_altup = 0;
 };
 
+struct skippy_activation_glm_dsa_top_k {
+    const int32_t * values = nullptr;
+    uint32_t token_count = 0;
+    uint32_t n_top_k = 0;
+    uint32_t n_stream = 0;
+};
+
 void skippy_graph_set_filter(const skippy_graph_filter & filter);
 void skippy_graph_clear_filter();
 const skippy_graph_filter & skippy_graph_get_filter();
@@ -66,6 +73,9 @@ const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first();
 void skippy_graph_set_gemma3n_altup(const skippy_activation_gemma3n_altup & values);
 void skippy_graph_clear_gemma3n_altup();
 const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup();
+void skippy_graph_set_glm_dsa_top_k(const skippy_activation_glm_dsa_top_k & values);
+void skippy_graph_clear_glm_dsa_top_k();
+const skippy_activation_glm_dsa_top_k & skippy_graph_get_glm_dsa_top_k();
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -220,6 +230,22 @@ public:
 private:
     int64_t n_embd;
     int64_t n_altup;
+};
+
+class llm_graph_input_glm_dsa_top_k : public llm_graph_input_i {
+public:
+    llm_graph_input_glm_dsa_top_k(int64_t n_top_k, int64_t n_stream) : n_top_k(n_top_k), n_stream(n_stream) {}
+    virtual ~llm_graph_input_glm_dsa_top_k() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * values = nullptr; // I32 [n_top_k, n_batch, 1, n_stream]
+
+private:
+    int64_t n_top_k;
+    int64_t n_stream;
 };
 
 class llm_graph_input_pos : public llm_graph_input_i {
@@ -788,6 +814,7 @@ public:
     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
     ggml_tensor * get_skippy_rwkv7_v_first() const { return t_skippy_rwkv7_v_first; }
     ggml_tensor * get_skippy_gemma3n_altup() const { return t_skippy_gemma3n_altup; }
+    ggml_tensor * get_skippy_glm_dsa_top_k() const { return t_skippy_glm_dsa_top_k; }
 
     ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
 
@@ -821,6 +848,7 @@ public:
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
     ggml_tensor * t_skippy_rwkv7_v_first = nullptr;
     ggml_tensor * t_skippy_gemma3n_altup = nullptr;
+    ggml_tensor * t_skippy_glm_dsa_top_k = nullptr;
 
     std::vector<ggml_tensor *> t_layer_inp;
 

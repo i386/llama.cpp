@@ -43,6 +43,7 @@ enum skippy_activation_layout {
 
 #define SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST   (UINT64_C(1) << 0)
 #define SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP   (UINT64_C(1) << 1)
+#define SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K   (UINT64_C(1) << 3)
 
 struct skippy_model;
 struct skippy_session;

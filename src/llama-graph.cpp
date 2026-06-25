@@ -23,6 +23,7 @@ static thread_local skippy_graph_filter g_skippy_graph_filter;
 static thread_local skippy_activation_tokens g_skippy_activation_tokens;
 static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
 static thread_local skippy_activation_gemma3n_altup g_skippy_gemma3n_altup;
+static thread_local skippy_activation_glm_dsa_top_k g_skippy_glm_dsa_top_k;
 
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
     g_skippy_graph_filter = filter;
@@ -70,6 +71,18 @@ void skippy_graph_clear_gemma3n_altup() {
 
 const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup() {
     return g_skippy_gemma3n_altup;
+}
+
+void skippy_graph_set_glm_dsa_top_k(const skippy_activation_glm_dsa_top_k & values) {
+    g_skippy_glm_dsa_top_k = values;
+}
+
+void skippy_graph_clear_glm_dsa_top_k() {
+    g_skippy_glm_dsa_top_k = {};
+}
+
+const skippy_activation_glm_dsa_top_k & skippy_graph_get_glm_dsa_top_k() {
+    return g_skippy_glm_dsa_top_k;
 }
 
 // dedup helpers
@@ -229,6 +242,34 @@ void llm_graph_input_gemma3n_altup::set_input(const llama_ubatch * ubatch) {
 
 bool llm_graph_input_gemma3n_altup::can_reuse(const llm_graph_params & params) {
     return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens && values->ne[2] == n_altup;
+}
+
+void llm_graph_input_glm_dsa_top_k::set_input(const llama_ubatch * ubatch) {
+    const skippy_activation_glm_dsa_top_k & sideband = skippy_graph_get_glm_dsa_top_k();
+    GGML_ASSERT(sideband.values != nullptr);
+    GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+    GGML_ASSERT(sideband.n_top_k == n_top_k);
+    GGML_ASSERT(sideband.n_stream == n_stream);
+
+    ggml_backend_tensor_set(values, sideband.values, 0, sideband.token_count*n_top_k*ggml_element_size(values));
+}
+
+bool llm_graph_input_glm_dsa_top_k::can_reuse(const llm_graph_params & params) {
+    const auto * mctx = static_cast<const llama_kv_cache_dsa_context *>(params.mctx);
+    const int64_t params_n_stream = params.cparams.kv_unified ? 1 : params.ubatch.n_seqs_unq;
+    if (mctx == nullptr || params_n_stream <= 0) {
+        return false;
+    }
+
+    const int64_t params_n_top_k = std::min<int64_t>(
+            mctx->get_lid()->get_n_kv(),
+            params.hparams.indexer_top_k);
+
+    return values &&
+           values->ne[0] == params_n_top_k &&
+           values->ne[1] == params.ubatch.n_tokens/params_n_stream &&
+           values->ne[2] == 1 &&
+           values->ne[3] == params_n_stream;
 }
 
 void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
@@ -1026,6 +1067,7 @@ void llm_graph_result::reset() {
     t_embd_pooled = nullptr;
     t_skippy_rwkv7_v_first = nullptr;
     t_skippy_gemma3n_altup = nullptr;
+    t_skippy_glm_dsa_top_k = nullptr;
 
     t_layer_inp.resize(LLAMA_MAX_LAYERS);
     std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
@@ -1076,6 +1118,9 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
     }
     if (t_skippy_gemma3n_altup != nullptr) {
         ggml_set_output(t_skippy_gemma3n_altup);
+    }
+    if (t_skippy_glm_dsa_top_k != nullptr) {
+        ggml_set_output(t_skippy_glm_dsa_top_k);
     }
     {
         const auto & embeddings_layer_inp = params.cparams.embeddings_layer_inp;

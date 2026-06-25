@@ -1044,6 +1044,35 @@ struct skippy_gemma3n_altup_scope {
     bool enabled = false;
 };
 
+struct skippy_glm_dsa_top_k_scope {
+    skippy_glm_dsa_top_k_scope(
+            const skippy_activation_desc * desc,
+            const void * payload,
+            size_t hidden_bytes,
+            uint32_t n_top_k,
+            uint32_t n_stream) {
+        if (desc != nullptr &&
+            payload != nullptr &&
+            (desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
+            skippy_activation_glm_dsa_top_k sideband;
+            sideband.values = reinterpret_cast<const int32_t *>(static_cast<const uint8_t *>(payload) + hidden_bytes);
+            sideband.token_count = desc->token_count;
+            sideband.n_top_k = n_top_k;
+            sideband.n_stream = n_stream;
+            skippy_graph_set_glm_dsa_top_k(sideband);
+            enabled = true;
+        }
+    }
+
+    ~skippy_glm_dsa_top_k_scope() {
+        if (enabled) {
+            skippy_graph_clear_glm_dsa_top_k();
+        }
+    }
+
+    bool enabled = false;
+};
+
 static bool skippy_is_filtered(const skippy_session * session) {
     return session != nullptr &&
            session->stage_model != nullptr &&
@@ -1069,6 +1098,47 @@ static bool skippy_is_gemma3n_activation_model(const skippy_session * session) {
     return session->stage_model->model->arch == LLM_ARCH_GEMMA3N;
 }
 
+static bool skippy_is_glm_dsa_activation_model(const skippy_session * session) {
+    if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
+        return false;
+    }
+    return session->stage_model->model->arch == LLM_ARCH_GLM_DSA;
+}
+
+static bool skippy_glm_dsa_layer_has_indexer(const llama_layer & layer) {
+    const bool has_any =
+            layer.indexer_k_norm   ||
+            layer.indexer_k_norm_b ||
+            layer.indexer_proj     ||
+            layer.indexer_attn_k   ||
+            layer.indexer_attn_q_b;
+
+    const bool has_all =
+            layer.indexer_k_norm   &&
+            layer.indexer_k_norm_b &&
+            layer.indexer_proj     &&
+            layer.indexer_attn_k   &&
+            layer.indexer_attn_q_b;
+
+    return has_any == has_all && has_all;
+}
+
+static bool skippy_glm_dsa_layer_starts_consumer_group(const skippy_session * session, int32_t layer_start) {
+    if (!skippy_is_glm_dsa_activation_model(session)) {
+        return false;
+    }
+    const skippy_runtime_config & config = session->stage_model->config;
+    const llama_model * model = session->stage_model->model;
+    return config.filter_tensors_on_load &&
+           layer_start > 0 &&
+           layer_start < static_cast<int32_t>(model->hparams.n_layer()) &&
+           !skippy_glm_dsa_layer_has_indexer(model->layers[layer_start]);
+}
+
+static bool skippy_glm_dsa_stage_starts_in_consumer_group(const skippy_session * session) {
+    return skippy_glm_dsa_layer_starts_consumer_group(session, session->stage_model->config.layer_start);
+}
+
 static size_t skippy_activation_hidden_bytes(const skippy_session * session, size_t token_count) {
     if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
         return 0;
@@ -1077,6 +1147,38 @@ static size_t skippy_activation_hidden_bytes(const skippy_session * session, siz
     return token_count *
            static_cast<size_t>(llama_model_n_embd(session->stage_model->model)) *
            sizeof(float);
+}
+
+static uint32_t skippy_glm_dsa_top_k_count_for_n_kv(const skippy_session * session, uint64_t n_kv) {
+    if (!skippy_is_glm_dsa_activation_model(session)) {
+        return 0;
+    }
+
+    // GLM-DSA top-k tensors are shaped from llama_kv_cache::get_n_kv(), not
+    // the logical sequence length. That graph width is padded to at least 256
+    // so the scheduler can reuse stable KV-cache graph shapes.
+    const uint64_t padded_n_kv = std::max<uint64_t>(256, GGML_PAD(n_kv, 256));
+    return static_cast<uint32_t>(
+            std::min<uint64_t>(padded_n_kv, session->stage_model->model->hparams.indexer_top_k));
+}
+
+static uint32_t skippy_glm_dsa_top_k_count(const skippy_session * session, size_t token_count) {
+    const uint64_t n_kv = static_cast<uint64_t>(std::max<int32_t>(session->n_past, 0)) + token_count;
+    return skippy_glm_dsa_top_k_count_for_n_kv(session, n_kv);
+}
+
+static uint32_t skippy_glm_dsa_n_stream(const skippy_session * session) {
+    GGML_UNUSED(session);
+    return 1;
+}
+
+static size_t skippy_glm_dsa_top_k_bytes_for_count(size_t token_count, uint32_t n_top_k) {
+    return static_cast<size_t>(n_top_k)*token_count*sizeof(int32_t);
+}
+
+static size_t skippy_glm_dsa_top_k_bytes(const skippy_session * session, size_t token_count) {
+    const uint32_t n_top_k = skippy_glm_dsa_top_k_count(session, token_count);
+    return skippy_glm_dsa_top_k_bytes_for_count(token_count, n_top_k);
 }
 
 static size_t skippy_gemma3n_altup_bytes(const skippy_session * session, size_t token_count) {
@@ -1095,6 +1197,11 @@ static uint64_t skippy_output_activation_flags(
         const skippy_activation_desc * input_desc) {
     if (skippy_emits_activation_frame(session) && skippy_is_gemma3n_activation_model(session)) {
         return SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP;
+    }
+    if (skippy_emits_activation_frame(session) &&
+        skippy_is_glm_dsa_activation_model(session) &&
+        skippy_glm_dsa_layer_starts_consumer_group(session, session->stage_model->config.layer_end)) {
+        return SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K;
     }
     if (!skippy_emits_activation_frame(session) || !skippy_is_rwkv7_activation_model(session)) {
         return 0;
@@ -1119,6 +1226,9 @@ static size_t skippy_activation_payload_bytes(
         return skippy_gemma3n_altup_bytes(session, token_count);
     }
     size_t payload_bytes = hidden_bytes;
+    if ((flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
+        payload_bytes += skippy_glm_dsa_top_k_bytes(session, token_count);
+    }
     if ((flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
         payload_bytes += hidden_bytes;
     }
@@ -1168,9 +1278,26 @@ static enum skippy_status skippy_validate_frame_input(
         return SKIPPY_STATUS_INVALID_ARGUMENT;
     }
 
-    const uint64_t supported_flags = SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST | SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP;
+    const uint64_t supported_flags =
+            SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST |
+            SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP |
+            SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K;
     if ((input_desc->flags & ~supported_flags) != 0) {
         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "activation frame has unsupported sideband flags");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0 && !skippy_is_glm_dsa_activation_model(session)) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "GLM-DSA top-k sideband is only valid for GLM-DSA stages");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if (skippy_glm_dsa_stage_starts_in_consumer_group(session) &&
+        (input_desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) == 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "GLM-DSA consumer slices require top-k sideband input");
+        return SKIPPY_STATUS_INVALID_ARGUMENT;
+    }
+    if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0 &&
+        (input_desc->flags & (SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP | SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST)) != 0) {
+        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "GLM-DSA top-k sideband cannot be combined with other activation sidebands");
         return SKIPPY_STATUS_INVALID_ARGUMENT;
     }
     if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0 && !skippy_is_gemma3n_activation_model(session)) {
@@ -2303,6 +2430,31 @@ static enum skippy_status skippy_copy_output_activation_frame(
 
     std::memcpy(output_payload, embeddings, hidden_bytes);
 
+    if ((output_flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
+        uint8_t * sideband_output = static_cast<uint8_t *>(output_payload) + hidden_bytes;
+        const uint64_t n_kv = static_cast<uint64_t>(std::max<int32_t>(session->n_past, 0));
+        const uint32_t n_top_k = skippy_glm_dsa_top_k_count_for_n_kv(session, n_kv);
+        const size_t top_k_bytes = skippy_glm_dsa_top_k_bytes_for_count(token_count, n_top_k);
+        llm_graph_result * res = session->ctx->get_gf_res_prev();
+        ggml_tensor * top_k = res != nullptr ? res->get_skippy_glm_dsa_top_k() : nullptr;
+        if (top_k != nullptr) {
+            if (ggml_nbytes(top_k) < top_k_bytes) {
+                skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "GLM-DSA top-k sideband tensor is smaller than expected payload");
+                return SKIPPY_STATUS_RUNTIME_ERROR;
+            }
+            ggml_backend_tensor_get(top_k, sideband_output, 0, top_k_bytes);
+        } else {
+            if (input_desc == nullptr ||
+                input_payload == nullptr ||
+                (input_desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) == 0 ||
+                input_desc->payload_bytes < hidden_bytes + top_k_bytes) {
+                skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "GLM-DSA downstream slice cannot forward missing top-k sideband");
+                return SKIPPY_STATUS_INVALID_ARGUMENT;
+            }
+            std::memcpy(sideband_output, static_cast<const uint8_t *>(input_payload) + hidden_bytes, top_k_bytes);
+        }
+    }
+
     if ((output_flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0) {
         uint8_t * sideband_output = static_cast<uint8_t *>(output_payload) + hidden_bytes;
         const skippy_runtime_config & config = session->stage_model->config;
@@ -2420,6 +2572,12 @@ static enum skippy_status skippy_decode_activation_frame(
     skippy_activation_tokens_scope activation_tokens_scope(token_ids, token_count);
     skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
     skippy_gemma3n_altup_scope gemma3n_altup_scope(input_desc, input_payload, n_embd, n_altup);
+    skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
+            input_desc,
+            input_payload,
+            hidden_bytes,
+            skippy_glm_dsa_top_k_count(session, token_count),
+            skippy_glm_dsa_n_stream(session));
     const llama_pos token_start = pos_storage.empty() ? session->n_past : pos_storage[0];
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     if (status == SKIPPY_STATUS_OK && token_ids != nullptr) {
@@ -2486,6 +2644,12 @@ static enum skippy_status skippy_verify_activation_frame(
 
     skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
     skippy_gemma3n_altup_scope gemma3n_altup_scope(input_desc, input_payload, n_embd, n_altup);
+    skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
+            input_desc,
+            input_payload,
+            hidden_bytes,
+            skippy_glm_dsa_top_k_count(session, token_count),
+            skippy_glm_dsa_n_stream(session));
     const llama_pos token_start = session->n_past;
     enum skippy_status status = skippy_decode_batch(session, batch, token_count, out_error);
     if (!alias_input_payload) {
