@@ -2,6 +2,28 @@
 
 #include "llama-kv-cache-dsa.h"
 
+static bool llama_glm_dsa_layer_has_indexer(const llama_layer & layer) {
+    const bool has_any =
+            layer.indexer_k_norm   ||
+            layer.indexer_k_norm_b ||
+            layer.indexer_proj     ||
+            layer.indexer_attn_k   ||
+            layer.indexer_attn_q_b;
+
+    const bool has_all =
+            layer.indexer_k_norm   &&
+            layer.indexer_k_norm_b &&
+            layer.indexer_proj     &&
+            layer.indexer_attn_k   &&
+            layer.indexer_attn_q_b;
+
+    if (has_any != has_all) {
+        throw std::runtime_error("GLM_DSA layer has incomplete indexer tensors");
+    }
+
+    return has_all;
+}
+
 void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,     hparams.n_ff_exp);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,    hparams.f_norm_rms_eps);
@@ -101,12 +123,14 @@ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
 
         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, flags);
 
-        // DSA indexer
-        layer.indexer_k_norm   = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "weight", i), {hparams.indexer_head_size}, flags);
-        layer.indexer_k_norm_b = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "bias",   i), {hparams.indexer_head_size}, flags);
-        layer.indexer_proj     = create_tensor(tn(LLM_TENSOR_INDEXER_PROJ,     "weight", i), {n_embd, hparams.indexer_n_head}, flags);
-        layer.indexer_attn_k   = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_K,   "weight", i), {n_embd, hparams.indexer_head_size}, flags);
-        layer.indexer_attn_q_b = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_Q_B, "weight", i), {q_lora_rank, hparams.indexer_n_head * hparams.indexer_head_size}, flags);
+        // GLM-DSA IndexShare stores indexer tensors only on producer layers.
+        const int indexer_flags = flags | TENSOR_NOT_REQUIRED;
+        layer.indexer_k_norm   = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "weight", i), {hparams.indexer_head_size}, indexer_flags);
+        layer.indexer_k_norm_b = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "bias",   i), {hparams.indexer_head_size}, indexer_flags);
+        layer.indexer_proj     = create_tensor(tn(LLM_TENSOR_INDEXER_PROJ,     "weight", i), {n_embd, hparams.indexer_n_head}, indexer_flags);
+        layer.indexer_attn_k   = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_K,   "weight", i), {n_embd, hparams.indexer_head_size}, indexer_flags);
+        layer.indexer_attn_q_b = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_Q_B, "weight", i), {q_lora_rank, hparams.indexer_n_head * hparams.indexer_head_size}, indexer_flags);
+        llama_glm_dsa_layer_has_indexer(layer);
         if (i < (int) hparams.n_layer_dense_lead) {
             layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, flags);
             layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, flags);
@@ -194,6 +218,7 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * inp_pos = build_inp_pos();
     llm_graph_input_attn_k_dsa * inp_attn_dsa = build_attn_inp_k_dsa();
     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
+    ggml_tensor * last_top_k = nullptr;
 
     for (int il = il_start; il < il_end; ++il) {
         ggml_tensor * inpSA = inpL;
@@ -208,9 +233,9 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
             qr = build_norm(qr, model.layers[il].attn_q_a_norm, nullptr, LLM_NORM_RMS, il);
             cb(qr, "qr", il);
 
-            ggml_tensor * top_k = nullptr;
+            ggml_tensor * top_k = last_top_k;
 
-            {
+            if (llama_glm_dsa_layer_has_indexer(model.layers[il])) {
                 ggml_tensor * indexer_q = ggml_mul_mat(ctx0, model.layers[il].indexer_attn_q_b, qr);
                 cb(indexer_q, "indexer_q", il);
 
@@ -296,6 +321,9 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
                 uint32_t n_top_k = indexer_score->ne[0] < n_indexer_top_k ? indexer_score->ne[0] : n_indexer_top_k;
                 top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
                 cb(top_k, "top_k", il);
+                last_top_k = top_k;
+            } else if (!top_k) {
+                throw std::runtime_error("GLM_DSA split starts inside an IndexShare consumer group without top-k sideband");
             }
 
             ggml_tensor * q = ggml_mul_mat(ctx0, model.layers[il].wq_b, qr);
