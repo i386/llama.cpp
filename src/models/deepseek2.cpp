@@ -534,6 +534,9 @@ llama_model_deepseek2::graph_mtp::graph_mtp(const llama_model & model, const llm
     ggml_set_name(inp->embd, "mtp_h_input");
 
     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
+    if (!tok_embd_w) {
+        throw std::runtime_error("MTP graph requires nextn.embed_tokens or token_embd");
+    }
     ggml_tensor * h_input  = inp->embd;
     ggml_tensor * tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
     cb(tok_embd, "mtp_tok_embd", il);
