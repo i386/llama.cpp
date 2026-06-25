@@ -570,6 +570,7 @@ extern "C" {
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_LIGHTNING_INDEXER,
         GGML_OP_DSA_SPARSE_MASK,
+        GGML_OP_DSA_SPARSE_ATTN,
 
         GGML_OP_UNARY,
 
@@ -2587,6 +2588,15 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * kq_mask,
             struct ggml_tensor  * top_k);
+
+    GGML_API struct ggml_tensor * ggml_dsa_sparse_attn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * kq_mask_rows,
+            struct ggml_tensor  * top_k,
+            float                 scale);
 
     // custom operators
 

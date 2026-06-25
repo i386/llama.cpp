@@ -6640,6 +6640,245 @@ struct test_timestep_embedding : public test_case {
     }
 };
 
+// GGML_OP_DSA_SPARSE_ATTN
+struct test_dsa_sparse_attn : public test_case {
+    const ggml_type type_k;
+    const ggml_type type_v;
+    const ggml_type type_mask;
+
+    const int64_t dk;
+    const int64_t dv;
+    const int64_t n_kv;
+    const int64_t n_batch;
+    const int64_t n_head;
+    const int64_t n_stream;
+    const int64_t n_top_k;
+    const int64_t n_top_stream;
+
+    std::string vars() override {
+        return VARS_TO_STR10(type_k, type_v, type_mask, dk, dv, n_kv, n_batch, n_head, n_stream, n_top_k);
+    }
+
+    test_dsa_sparse_attn(ggml_type type_k = GGML_TYPE_F16, ggml_type type_v = GGML_TYPE_F16, ggml_type type_mask = GGML_TYPE_F16,
+            int64_t dk = 16, int64_t dv = 12, int64_t n_kv = 33, int64_t n_batch = 2,
+            int64_t n_head = 4, int64_t n_stream = 1, int64_t n_top_k = 4, int64_t n_top_stream = 1)
+        : type_k(type_k), type_v(type_v), type_mask(type_mask), dk(dk), dv(dv), n_kv(n_kv),
+          n_batch(n_batch), n_head(n_head), n_stream(n_stream), n_top_k(n_top_k), n_top_stream(n_top_stream) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q       = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, dk, n_batch, n_head, n_stream);
+        ggml_tensor * k       = ggml_new_tensor_4d(ctx, type_k,         dk, n_kv,    1,      n_stream);
+        ggml_tensor * v       = ggml_new_tensor_4d(ctx, type_v,         dv, n_kv,    1,      n_stream);
+        ggml_tensor * kq_mask = ggml_new_tensor_4d(ctx, type_mask,      1,  n_kv,    n_batch, n_stream);
+        ggml_tensor * top_k   = ggml_new_tensor_4d(ctx, GGML_TYPE_I32,  n_top_k, n_batch, n_top_stream, 1);
+
+        ggml_set_name(q,       "q");
+        ggml_set_name(k,       "k");
+        ggml_set_name(v,       "v");
+        ggml_set_name(kq_mask, "kq_mask");
+        ggml_set_name(top_k,   "top_k");
+
+        ggml_tensor * out = ggml_dsa_sparse_attn(ctx, q, k, v, kq_mask, top_k, scale());
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "q") == 0) {
+                init_q(t);
+            } else if (strcmp(t->name, "k") == 0) {
+                init_k(t);
+            } else if (strcmp(t->name, "v") == 0) {
+                init_v(t);
+            } else if (strcmp(t->name, "kq_mask") == 0) {
+                init_kq_mask(t);
+            } else if (strcmp(t->name, "top_k") == 0) {
+                init_top_k(t);
+            } else if (!ggml_is_view_op(t->op)) {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+
+    double err(const float * a, const float * b, size_t n) override {
+        if (n != (size_t) (dv * n_batch * n_head * n_stream)) {
+            return 1.0;
+        }
+
+        double err = 0.0;
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_head = 0; i_head < n_head; ++i_head) {
+                for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                    std::vector<float> expected = expected_row(i_batch, i_head, i_stream);
+                    for (int64_t i_dv = 0; i_dv < dv; ++i_dv) {
+                        const size_t idx = ((i_stream*n_head + i_head)*n_batch + i_batch)*dv + i_dv;
+                        err = std::max(err, (double) std::abs(a[idx] - expected[i_dv]));
+                        err = std::max(err, (double) std::abs(b[idx] - expected[i_dv]));
+                    }
+                }
+            }
+        }
+        return err;
+    }
+
+    double max_err(ggml_backend_t backend) override {
+        (void) backend;
+        return type_k == GGML_TYPE_F16 || type_v == GGML_TYPE_F16 || type_mask == GGML_TYPE_F16 ? 2e-3 : 1e-5;
+    }
+
+    double max_nmse_err() override {
+        return type_k == GGML_TYPE_F16 || type_v == GGML_TYPE_F16 || type_mask == GGML_TYPE_F16 ? 2e-6 : 1e-7;
+    }
+
+    bool run_whole_graph() override {
+        return true;
+    }
+
+private:
+    float scale() const {
+        return 1.0f / sqrtf((float) dk);
+    }
+
+    float q_value(int64_t i_dk, int64_t i_batch, int64_t i_head, int64_t i_stream) const {
+        return 0.01f * (float) (1 + i_dk + 3*i_batch + 5*i_head + 7*i_stream);
+    }
+
+    float k_value(int64_t i_dk, int64_t i_kv, int64_t i_stream) const {
+        return 0.02f * (float) (1 + i_dk + 2*i_kv + 11*i_stream);
+    }
+
+    float v_value(int64_t i_dv, int64_t i_kv, int64_t i_stream) const {
+        return 0.03f * (float) (1 + i_dv + 3*i_kv + 13*i_stream);
+    }
+
+    int32_t top_k_index(int64_t i_top, int64_t i_batch, int64_t i_stream) const {
+        return (int32_t) ((i_top + 5*i_batch + 9*i_stream) % n_kv);
+    }
+
+    float mask_value(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
+        const int64_t valid_limit = n_kv - 1 - ((i_batch + i_stream) % std::max<int64_t>(1, n_top_k));
+        return i_kv <= valid_limit ? 0.0f : -INFINITY;
+    }
+
+    void init_q(ggml_tensor * t) const {
+        std::vector<float> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_head = 0; i_head < n_head; ++i_head) {
+                for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                    for (int64_t i_dk = 0; i_dk < dk; ++i_dk) {
+                        const size_t idx = ((i_stream*n_head + i_head)*n_batch + i_batch)*dk + i_dk;
+                        data[idx] = q_value(i_dk, i_batch, i_head, i_stream);
+                    }
+                }
+            }
+        }
+        ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
+    }
+
+    template <typename ValueFn>
+    void init_typed_row_tensor(ggml_tensor * t, ggml_type type, int64_t width, ValueFn value) const {
+        std::vector<float> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
+                for (int64_t i = 0; i < width; ++i) {
+                    const size_t idx = (i_stream*n_kv + i_kv)*width + i;
+                    data[idx] = value(i, i_kv, i_stream);
+                }
+            }
+        }
+
+        if (type == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> data_f16(data.size());
+            ggml_fp32_to_fp16_row(data.data(), data_f16.data(), data.size());
+            ggml_backend_tensor_set(t, data_f16.data(), 0, data_f16.size()*sizeof(ggml_fp16_t));
+        } else {
+            ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
+        }
+    }
+
+    void init_k(ggml_tensor * t) const {
+        init_typed_row_tensor(t, type_k, dk, [&](int64_t i, int64_t i_kv, int64_t i_stream) {
+            return k_value(i, i_kv, i_stream);
+        });
+    }
+
+    void init_v(ggml_tensor * t) const {
+        init_typed_row_tensor(t, type_v, dv, [&](int64_t i, int64_t i_kv, int64_t i_stream) {
+            return v_value(i, i_kv, i_stream);
+        });
+    }
+
+    void init_kq_mask(ggml_tensor * t) const {
+        std::vector<float> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
+                    const size_t idx = (i_stream*n_batch + i_batch)*n_kv + i_kv;
+                    data[idx] = mask_value(i_kv, i_batch, i_stream);
+                }
+            }
+        }
+
+        if (type_mask == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> data_f16(data.size());
+            ggml_fp32_to_fp16_row(data.data(), data_f16.data(), data.size());
+            ggml_backend_tensor_set(t, data_f16.data(), 0, data_f16.size()*sizeof(ggml_fp16_t));
+        } else {
+            ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
+        }
+    }
+
+    void init_top_k(ggml_tensor * t) const {
+        std::vector<int32_t> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_top_stream; ++i_stream) {
+            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+                    const size_t idx = (i_stream*n_batch + i_batch)*n_top_k + i_top;
+                    data[idx] = top_k_index(i_top, i_batch, i_stream);
+                }
+            }
+        }
+        ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
+    }
+
+    std::vector<float> expected_row(int64_t i_batch, int64_t i_head, int64_t i_stream) const {
+        std::vector<float> scores(n_top_k);
+        float max_score = -INFINITY;
+        const int64_t i_top_stream = i_stream % n_top_stream;
+
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            const int64_t i_kv = top_k_index(i_top, i_batch, i_top_stream);
+            float qk = 0.0f;
+            for (int64_t i_dk = 0; i_dk < dk; ++i_dk) {
+                qk += q_value(i_dk, i_batch, i_head, i_stream) * k_value(i_dk, i_kv, i_stream);
+            }
+            scores[i_top] = qk * scale() + mask_value(i_kv, i_batch, i_stream);
+            max_score = std::max(max_score, scores[i_top]);
+        }
+
+        std::vector<float> out(dv, 0.0f);
+        if (!std::isfinite(max_score)) {
+            return out;
+        }
+
+        float sum = 0.0f;
+        for (float & score : scores) {
+            score = expf(score - max_score);
+            sum += score;
+        }
+
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            const int64_t i_kv = top_k_index(i_top, i_batch, i_top_stream);
+            const float p = scores[i_top] / sum;
+            for (int64_t i_dv = 0; i_dv < dv; ++i_dv) {
+                out[i_dv] += p * v_value(i_dv, i_kv, i_stream);
+            }
+        }
+        return out;
+    }
+};
+
 // GGML_OP_LEAKY_RELU
 struct test_leaky_relu : public test_case {
     const ggml_type type;
@@ -9358,6 +9597,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F32, 33, 2, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 33, 2, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 65, 4, 2, 8, 2));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 16, 12, 33, 2, 4, 1, 4, 1));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 16, 12, 33, 2, 4, 1, 4, 1));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 32, 24, 65, 4, 8, 2, 8, 2));
 
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));

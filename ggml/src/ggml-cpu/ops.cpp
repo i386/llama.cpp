@@ -10928,6 +10928,151 @@ void ggml_compute_forward_dsa_sparse_mask(
     }
 }
 
+// ggml_compute_forward_dsa_sparse_attn
+
+static float ggml_dsa_sparse_attn_mask_value(const ggml_tensor * mask, int64_t i_kv, int64_t i_batch, int64_t i_stream) {
+    const char * data = (const char *) mask->data + i_kv * mask->nb[1] + i_batch * mask->nb[2] + i_stream * mask->nb[3];
+    return mask->type == GGML_TYPE_F32 ? *(const float *) data : GGML_CPU_FP16_TO_FP32(*(const ggml_fp16_t *) data);
+}
+
+void ggml_compute_forward_dsa_sparse_attn(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0]; // q: [Dk, n_batch, n_head, n_stream]
+    const ggml_tensor * src1 = dst->src[1]; // k: [Dk, n_kv, n_kv_head, n_stream]
+    const ggml_tensor * src2 = dst->src[2]; // v: [Dv, n_kv, n_v_head, n_stream]
+    const ggml_tensor * src3 = dst->src[3]; // kq mask rows: [1, n_kv, n_batch, n_stream]
+    const ggml_tensor * src4 = dst->src[4]; // top_k: [n_top_k, n_batch, n_top_stream, 1]
+
+    const float scale = ggml_get_op_params_f32(dst, 0);
+
+    GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(src3->type == GGML_TYPE_F32 || src3->type == GGML_TYPE_F16);
+    GGML_ASSERT(src4->type == GGML_TYPE_I32);
+
+    GGML_ASSERT(dst->ne[0] == src2->ne[0]);
+    GGML_ASSERT(dst->ne[1] == src0->ne[1]);
+    GGML_ASSERT(dst->ne[2] == src0->ne[2]);
+    GGML_ASSERT(dst->ne[3] == src0->ne[3]);
+
+    const int64_t dk           = src0->ne[0];
+    const int64_t dv           = src2->ne[0];
+    const int64_t n_batch      = src0->ne[1];
+    const int64_t n_head       = src0->ne[2];
+    const int64_t n_stream     = src0->ne[3];
+    const int64_t n_kv         = src1->ne[1];
+    const int64_t n_kv_head    = src1->ne[2];
+    const int64_t n_v_head     = src2->ne[2];
+    const int64_t n_top_k      = src4->ne[0];
+    const int64_t n_top_stream = src4->ne[2];
+
+    GGML_ASSERT(src1->ne[0] == dk);
+    GGML_ASSERT(src2->ne[1] == n_kv);
+    GGML_ASSERT(src3->ne[0] == 1);
+    GGML_ASSERT(src3->ne[1] == n_kv);
+    GGML_ASSERT(src3->ne[2] == n_batch);
+    GGML_ASSERT(src3->ne[3] == n_stream);
+    GGML_ASSERT(src4->ne[1] == n_batch);
+    GGML_ASSERT(n_stream % n_top_stream == 0);
+    GGML_ASSERT(src4->ne[3] == 1);
+    GGML_ASSERT(n_head % n_kv_head == 0);
+    GGML_ASSERT(n_head % n_v_head == 0);
+
+    ggml_to_float_t const k_to_float = ggml_get_type_traits(src1->type)->to_float;
+    ggml_to_float_t const v_to_float = ggml_get_type_traits(src2->type)->to_float;
+    GGML_ASSERT((src1->type == GGML_TYPE_F32 || k_to_float) && "dsa sparse attn: unsupported K type");
+    GGML_ASSERT((src2->type == GGML_TYPE_F32 || v_to_float) && "dsa sparse attn: unsupported V type");
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    float * k_row_f32 = (float *) params->wdata + ith * (dk + dv + n_top_k + CACHE_LINE_SIZE_F32);
+    float * v_row_f32 = k_row_f32 + dk;
+    float * scores    = v_row_f32 + dv;
+
+    const int64_t total = n_stream * n_head * n_batch;
+    const int64_t dr    = (total + nth - 1) / nth;
+    const int64_t i0    = dr * ith;
+    const int64_t i1    = MIN(i0 + dr, total);
+
+    for (int64_t i = i0; i < i1; ++i) {
+        const int64_t i_batch  = i % n_batch;
+        const int64_t i_head   = (i / n_batch) % n_head;
+        const int64_t i_stream = i / (n_batch * n_head);
+
+        const int64_t i_kv_head    = i_head / (n_head / n_kv_head);
+        const int64_t i_v_head     = i_head / (n_head / n_v_head);
+        const int64_t i_top_stream = i_stream % n_top_stream;
+
+        const float * q_row = (const float *) ((const char *) src0->data +
+                i_batch * src0->nb[1] + i_head * src0->nb[2] + i_stream * src0->nb[3]);
+
+        float max_score = -INFINITY;
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            const char * top_k_data = (const char *) src4->data +
+                    i_top * src4->nb[0] + i_batch * src4->nb[1] + i_top_stream * src4->nb[2];
+            const int32_t i_kv = *(const int32_t *) top_k_data;
+            GGML_ASSERT(i_kv >= 0 && i_kv < n_kv);
+
+            const char * k_row = (const char *) src1->data +
+                    i_kv * src1->nb[1] + i_kv_head * src1->nb[2] + i_stream * src1->nb[3];
+            const float * k_row_data;
+            if (k_to_float) {
+                k_to_float(k_row, k_row_f32, dk);
+                k_row_data = k_row_f32;
+            } else {
+                k_row_data = (const float *) k_row;
+            }
+
+            float qk = 0.0f;
+            ggml_vec_dot_f32(dk, &qk, 0, q_row, 0, k_row_data, 0, 1);
+            scores[i_top] = qk * scale + ggml_dsa_sparse_attn_mask_value(src3, i_kv, i_batch, i_stream);
+            max_score = MAX(max_score, scores[i_top]);
+        }
+
+        if (!isfinite(max_score)) {
+            float * dst_row = (float *) ((char *) dst->data +
+                    i_batch * dst->nb[1] + i_head * dst->nb[2] + i_stream * dst->nb[3]);
+            memset(dst_row, 0, dv * sizeof(float));
+            continue;
+        }
+
+        float sum = 0.0f;
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            scores[i_top] = expf(scores[i_top] - max_score);
+            sum += scores[i_top];
+        }
+
+        float * dst_row = (float *) ((char *) dst->data +
+                i_batch * dst->nb[1] + i_head * dst->nb[2] + i_stream * dst->nb[3]);
+        memset(dst_row, 0, dv * sizeof(float));
+
+        if (sum == 0.0f || !isfinite(sum)) {
+            continue;
+        }
+
+        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+            const char * top_k_data = (const char *) src4->data +
+                    i_top * src4->nb[0] + i_batch * src4->nb[1] + i_top_stream * src4->nb[2];
+            const int32_t i_kv = *(const int32_t *) top_k_data;
+
+            const char * v_row = (const char *) src2->data +
+                    i_kv * src2->nb[1] + i_v_head * src2->nb[2] + i_stream * src2->nb[3];
+            const float * v_row_data;
+            if (v_to_float) {
+                v_to_float(v_row, v_row_f32, dv);
+                v_row_data = v_row_f32;
+            } else {
+                v_row_data = (const float *) v_row;
+            }
+
+            const float p = scores[i_top] / sum;
+            ggml_vec_mad_f32(dv, dst_row, v_row_data, p);
+        }
+    }
+}
+
 // ggml_compute_forward_rwkv_wkv7
 
 static void ggml_compute_forward_rwkv_wkv7_f32(

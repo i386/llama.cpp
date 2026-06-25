@@ -1066,6 +1066,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GATED_DELTA_NET",
     "LIGHTNING_INDEXER",
     "DSA_SPARSE_MASK",
+    "DSA_SPARSE_ATTN",
 
     "UNARY",
 
@@ -1083,7 +1084,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1179,6 +1180,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "gated_delta_net(q, k, v, g, beta, s)",
     "lightning_indexer(q, k, weights, scale_embd, scale_heads)",
     "dsa_sparse_mask(kq_mask, top_k)",
+    "dsa_sparse_attn(q, k, v, kq_mask, top_k)",
 
     "unary(x)",
 
@@ -1196,7 +1198,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6329,6 +6331,55 @@ struct ggml_tensor * ggml_dsa_sparse_mask(
     result->op     = GGML_OP_DSA_SPARSE_MASK;
     result->src[0] = kq_mask_rows;
     result->src[1] = top_k;
+
+    return result;
+}
+
+// ggml_dsa_sparse_attn
+
+struct ggml_tensor * ggml_dsa_sparse_attn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * kq_mask_rows,
+        struct ggml_tensor  * top_k,
+        float                 scale) {
+
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(k->type == GGML_TYPE_F32 || ggml_get_type_traits(k->type)->to_float);
+    GGML_ASSERT(v->type == GGML_TYPE_F32 || ggml_get_type_traits(v->type)->to_float);
+    GGML_ASSERT(kq_mask_rows->type == GGML_TYPE_F32 || kq_mask_rows->type == GGML_TYPE_F16);
+    GGML_ASSERT(top_k->type == GGML_TYPE_I32);
+
+    GGML_ASSERT(q->ne[0] == k->ne[0]);
+    GGML_ASSERT(k->ne[1] == v->ne[1]);
+    GGML_ASSERT(q->ne[3] == k->ne[3]);
+    GGML_ASSERT(q->ne[3] == v->ne[3]);
+
+    GGML_ASSERT(kq_mask_rows->ne[0] == 1);
+    GGML_ASSERT(kq_mask_rows->ne[1] == k->ne[1]);
+    GGML_ASSERT(kq_mask_rows->ne[2] == q->ne[1]);
+    GGML_ASSERT(kq_mask_rows->ne[3] == q->ne[3]);
+
+    GGML_ASSERT(top_k->ne[1] == q->ne[1]);
+    GGML_ASSERT(kq_mask_rows->ne[3] % top_k->ne[2] == 0);
+    GGML_ASSERT(top_k->ne[3] == 1);
+
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0);
+    GGML_ASSERT(q->ne[2] % v->ne[2] == 0);
+
+    int64_t ne[4] = { v->ne[0], q->ne[1], q->ne[2], q->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_DSA_SPARSE_ATTN;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = kq_mask_rows;
+    result->src[4] = top_k;
+
+    ggml_set_op_params_f32(result, 0, scale);
 
     return result;
 }
