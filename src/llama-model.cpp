@@ -1477,7 +1477,11 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    LLAMA_LOG_INFO("%s: initializing mappings for %zu model part(s)\n",
+        __func__, ml.files.size());
     ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    LLAMA_LOG_INFO("%s: initialized %zu mapping(s); creating backend buffers for %zu tensor group(s)\n",
+        __func__, ml.mappings.size(), ml.ctx_map.size());
     pimpl->mappings.reserve(ml.mappings.size());
 
     // create the backend buffers
@@ -1488,13 +1492,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     const size_t n_max_backend_buffer = ml.ctx_map.size() * ml.files.size();
     pimpl->ctxs_bufs.reserve(n_max_backend_buffer);
 
+    size_t ctx_idx = 0;
     for (auto & [buft, ctx_ptr] : ml.ctx_map) {
+        ++ctx_idx;
         ggml_context * ctx = ctx_ptr.get();
 
         // skip contexts without tensors
         if (ggml_get_first_tensor(ctx) == nullptr) {
             continue;
         }
+
+        LLAMA_LOG_INFO("%s: creating backend buffer group %zu/%zu (%s)\n",
+            __func__, ctx_idx, ml.ctx_map.size(), ggml_backend_buft_name(buft));
 
         llama_buf_map buf_map;
         buf_map.reserve(n_max_backend_buffer);
@@ -1566,6 +1575,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         }
 
+        LLAMA_LOG_INFO("%s: created backend buffer group %zu/%zu with %zu buffer(s)\n",
+            __func__, ctx_idx, ml.ctx_map.size(), bufs.size());
+
         pimpl->ctxs_bufs.emplace_back(std::move(ctx_ptr), std::move(bufs));
 
         ctx_buf_maps.emplace_back(ctx, buf_map);
@@ -1600,11 +1612,19 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     }
 
     // load tensor data
+    LLAMA_LOG_INFO("%s: loading tensor data for %zu tensor group(s)\n",
+        __func__, ctx_buf_maps.size());
+    size_t load_ctx_idx = 0;
     for (auto & [ctx, buf_map] : ctx_buf_maps) {
+        ++load_ctx_idx;
+        LLAMA_LOG_INFO("%s: loading tensor data group %zu/%zu\n",
+            __func__, load_ctx_idx, ctx_buf_maps.size());
         if (!ml.load_all_data(ctx, buf_map, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
             return false;
         }
     }
+    LLAMA_LOG_INFO("%s: loaded tensor data for %zu tensor group(s)\n",
+        __func__, ctx_buf_maps.size());
 
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
