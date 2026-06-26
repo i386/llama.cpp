@@ -9515,6 +9515,7 @@ kernel void kernel_dsa_sparse_attn_impl(
     const int32_t i_top_stream  = i_stream%args.ne42;
 
     float local_max = -FLT_MAX;
+    float local_active_top_end = 0.0f;
 
     for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
         const int32_t i_kv = ((device const int32_t *) ((device const char *) top_k +
@@ -9527,6 +9528,8 @@ kernel void kernel_dsa_sparse_attn_impl(
             const float mask = float(*mask_ptr);
 
             if (isfinite(mask)) {
+                local_active_top_end = max(local_active_top_end, float(i_top + 1));
+
                 float qk = 0.0f;
 
                 for (int32_t i_dk = 0; i_dk < args.ne00; ++i_dk) {
@@ -9556,10 +9559,21 @@ kernel void kernel_dsa_sparse_attn_impl(
     }
 
     const float max_score = reduce[0];
+    reduce[tid] = local_active_top_end;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int32_t stride = nth/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[tid] = max(reduce[tid], reduce[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const int32_t active_top_end = int32_t(reduce[0]);
     float local_sum = 0.0f;
 
     if (max_score > -FLT_MAX/2) {
-        for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+        for (int32_t i_top = tid; i_top < active_top_end; i_top += nth) {
             scores[i_top] = exp(scores[i_top] - max_score);
             local_sum += scores[i_top];
         }
@@ -9585,7 +9599,7 @@ kernel void kernel_dsa_sparse_attn_impl(
         float acc = 0.0f;
 
         if (sum_score > 0.0f && isfinite(sum_score)) {
-            for (int32_t i_top = 0; i_top < args.ne40; ++i_top) {
+            for (int32_t i_top = 0; i_top < active_top_end; ++i_top) {
                 const int32_t i_kv = ((device const int32_t *) ((device const char *) top_k +
                         i_top*args.nb40 + i_batch*args.nb41 + i_top_stream*args.nb42))[0];
                 if (i_kv < 0 || i_kv >= args.ne11) {

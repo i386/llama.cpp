@@ -11009,6 +11009,7 @@ void ggml_compute_forward_dsa_sparse_attn(
                 i_batch * src0->nb[1] + i_head * src0->nb[2] + i_stream * src0->nb[3]);
 
         float max_score = -INFINITY;
+        int64_t active_top_end = 0;
         for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
             const char * top_k_data = (const char *) src4->data +
                     i_top * src4->nb[0] + i_batch * src4->nb[1] + i_top_stream * src4->nb[2];
@@ -11020,6 +11021,7 @@ void ggml_compute_forward_dsa_sparse_attn(
                 scores[i_top] = -INFINITY;
                 continue;
             }
+            active_top_end = i_top + 1;
 
             const char * k_row = (const char *) src1->data +
                     i_kv * src1->nb[1] + i_kv_head * src1->nb[2] + i_stream * src1->nb[3];
@@ -11045,7 +11047,7 @@ void ggml_compute_forward_dsa_sparse_attn(
         }
 
         float sum = 0.0f;
-        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+        for (int64_t i_top = 0; i_top < active_top_end; ++i_top) {
             scores[i_top] = expf(scores[i_top] - max_score);
             sum += scores[i_top];
         }
@@ -11058,7 +11060,7 @@ void ggml_compute_forward_dsa_sparse_attn(
             continue;
         }
 
-        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
+        for (int64_t i_top = 0; i_top < active_top_end; ++i_top) {
             const char * top_k_data = (const char *) src4->data +
                     i_top * src4->nb[0] + i_batch * src4->nb[1] + i_top_stream * src4->nb[2];
             const int32_t i_kv = *(const int32_t *) top_k_data;
