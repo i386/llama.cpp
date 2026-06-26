@@ -62,10 +62,15 @@ struct skippy_glm_dsa_op_stat {
 
 struct skippy_glm_dsa_op_timing {
     bool enabled = false;
+    bool print_timing = false;
+    bool trace_tensors = false;
     int32_t stage_index = -1;
     size_t token_count = 0;
     skippy_glm_dsa_op_kind pending_kind = SKIPPY_GLM_DSA_OP_UNKNOWN;
     int64_t pending_start_us = 0;
+    uint32_t trace_value_limit = 8;
+    uint32_t trace_node_limit = 32;
+    uint32_t trace_nodes = 0;
     skippy_glm_dsa_op_stat stats[SKIPPY_GLM_DSA_OP_COUNT] = {};
 };
 
@@ -1425,12 +1430,32 @@ static bool skippy_env_enabled(const char * name) {
            std::strcmp(value, "no") != 0;
 }
 
+static uint32_t skippy_env_u32(const char * name, uint32_t fallback, uint32_t min_value, uint32_t max_value) {
+    const char * value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+
+    char * end = nullptr;
+    errno = 0;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
+        return fallback;
+    }
+
+    return std::min<uint32_t>(max_value, std::max<uint32_t>(min_value, static_cast<uint32_t>(parsed)));
+}
+
 static bool skippy_mtp_greedy_sampling_fastpath_enabled() {
     return skippy_env_enabled("SKIPPY_NATIVE_MTP_GREEDY_SAMPLING_FASTPATH");
 }
 
 static bool skippy_glm_dsa_op_timing_enabled() {
     return skippy_env_enabled("SKIPPY_GLM_DSA_OP_TIMING");
+}
+
+static bool skippy_glm_dsa_tensor_trace_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_TENSOR_TRACE");
 }
 
 static bool skippy_name_starts_with(const char * name, const char * prefix) {
@@ -1488,6 +1513,99 @@ static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * nam
     return SKIPPY_GLM_DSA_OP_UNKNOWN;
 }
 
+static bool skippy_glm_dsa_tensor_has_buffer(const ggml_tensor * tensor) {
+    return tensor != nullptr &&
+           tensor->data != nullptr &&
+           (tensor->view_src != nullptr ? tensor->view_src->buffer : tensor->buffer) != nullptr;
+}
+
+static void skippy_glm_dsa_trace_tensor_values(const ggml_tensor * tensor, uint32_t limit) {
+    const size_t value_count = static_cast<size_t>(
+            std::min<int64_t>(static_cast<int64_t>(limit), std::max<int64_t>(0, ggml_nelements(tensor))));
+
+    std::fprintf(stderr, " values=[");
+    if (value_count == 0) {
+        std::fprintf(stderr, "]");
+        return;
+    }
+
+    if (!skippy_glm_dsa_tensor_has_buffer(tensor)) {
+        std::fprintf(stderr, "unallocated]");
+        return;
+    }
+
+    switch (tensor->type) {
+        case GGML_TYPE_F32: {
+            std::vector<float> values(value_count);
+            ggml_backend_tensor_get(tensor, values.data(), 0, value_count * sizeof(float));
+            for (size_t i = 0; i < value_count; ++i) {
+                std::fprintf(stderr, "%s%.9g", i == 0 ? "" : ",", static_cast<double>(values[i]));
+            }
+            break;
+        }
+        case GGML_TYPE_F16:
+        case GGML_TYPE_BF16: {
+            const ggml_type_traits * traits = ggml_get_type_traits(tensor->type);
+            if (traits == nullptr || traits->to_float == nullptr) {
+                std::fprintf(stderr, "unsupported:%s", ggml_type_name(tensor->type));
+                break;
+            }
+            std::vector<uint16_t> raw(value_count);
+            std::vector<float> values(value_count);
+            ggml_backend_tensor_get(tensor, raw.data(), 0, value_count * sizeof(uint16_t));
+            traits->to_float(raw.data(), values.data(), value_count);
+            for (size_t i = 0; i < value_count; ++i) {
+                std::fprintf(stderr, "%s%.9g", i == 0 ? "" : ",", static_cast<double>(values[i]));
+            }
+            break;
+        }
+        case GGML_TYPE_I32: {
+            std::vector<int32_t> values(value_count);
+            ggml_backend_tensor_get(tensor, values.data(), 0, value_count * sizeof(int32_t));
+            for (size_t i = 0; i < value_count; ++i) {
+                std::fprintf(stderr, "%s%d", i == 0 ? "" : ",", values[i]);
+            }
+            break;
+        }
+        default:
+            std::fprintf(stderr, "unsupported:%s", ggml_type_name(tensor->type));
+            break;
+    }
+
+    std::fprintf(stderr, "]");
+}
+
+static void skippy_glm_dsa_trace_tensor(
+        skippy_glm_dsa_op_timing & timing,
+        skippy_glm_dsa_op_kind kind,
+        const ggml_tensor * tensor) {
+    if (!timing.trace_tensors || timing.trace_nodes >= timing.trace_node_limit) {
+        return;
+    }
+
+    timing.trace_nodes += 1;
+    std::fprintf(stderr,
+            "skippy: glm_dsa_tensor_trace stage=%d tokens=%zu op=%s node=%u name=%s type=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] contiguous=%d nbytes=%zu",
+            timing.stage_index,
+            timing.token_count,
+            skippy_glm_dsa_op_name(kind),
+            timing.trace_nodes,
+            tensor->name,
+            ggml_type_name(tensor->type),
+            static_cast<long long>(tensor->ne[0]),
+            static_cast<long long>(tensor->ne[1]),
+            static_cast<long long>(tensor->ne[2]),
+            static_cast<long long>(tensor->ne[3]),
+            static_cast<size_t>(tensor->nb[0]),
+            static_cast<size_t>(tensor->nb[1]),
+            static_cast<size_t>(tensor->nb[2]),
+            static_cast<size_t>(tensor->nb[3]),
+            ggml_is_contiguous(tensor) ? 1 : 0,
+            ggml_nbytes(tensor));
+    skippy_glm_dsa_trace_tensor_values(tensor, timing.trace_value_limit);
+    std::fprintf(stderr, "\n");
+}
+
 static bool skippy_glm_dsa_op_timing_cb(ggml_tensor * tensor, bool ask, void * user_data) {
     skippy_model * model = static_cast<skippy_model *>(user_data);
     if (model == nullptr || !model->glm_dsa_timing.enabled || tensor == nullptr) {
@@ -1509,6 +1627,7 @@ static bool skippy_glm_dsa_op_timing_cb(ggml_tensor * tensor, bool ask, void * u
     const int64_t elapsed_us = std::max<int64_t>(0, ggml_time_us() - timing.pending_start_us);
     timing.stats[kind].nodes += 1;
     timing.stats[kind].elapsed_us += elapsed_us;
+    skippy_glm_dsa_trace_tensor(timing, kind, tensor);
     timing.pending_kind = SKIPPY_GLM_DSA_OP_UNKNOWN;
     timing.pending_start_us = 0;
     return true;
@@ -1546,11 +1665,20 @@ static void skippy_glm_dsa_op_timing_begin(skippy_session * session, size_t toke
     }
 
     skippy_glm_dsa_op_timing & timing = session->stage_model->glm_dsa_timing;
+    const bool enabled = timing.enabled;
+    const bool print_timing = timing.print_timing;
+    const bool trace_tensors = timing.trace_tensors;
     const int32_t stage_index = timing.stage_index;
+    const uint32_t trace_value_limit = timing.trace_value_limit;
+    const uint32_t trace_node_limit = timing.trace_node_limit;
     timing = {};
-    timing.enabled = true;
+    timing.enabled = enabled;
+    timing.print_timing = print_timing;
+    timing.trace_tensors = trace_tensors;
     timing.stage_index = stage_index;
     timing.token_count = token_count;
+    timing.trace_value_limit = trace_value_limit;
+    timing.trace_node_limit = trace_node_limit;
 }
 
 static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
@@ -1566,6 +1694,9 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
         total_us += timing.stats[i].elapsed_us;
     }
     if (total_nodes == 0) {
+        return;
+    }
+    if (!timing.print_timing) {
         return;
     }
 
@@ -2992,8 +3123,16 @@ static enum skippy_status skippy_finish_model_open(
     params.type_v = config != nullptr && config->cache_type_v > 0 ? static_cast<ggml_type>(config->cache_type_v) : GGML_TYPE_F16;
     params.flash_attn_type = config != nullptr ? static_cast<llama_flash_attn_type>(config->flash_attn_type) : LLAMA_FLASH_ATTN_TYPE_AUTO;
     params.embeddings = config != nullptr && config->filter_tensors_on_load && !config->include_output;
-    if (model->arch == LLM_ARCH_GLM_DSA && skippy_glm_dsa_op_timing_enabled()) {
+    const bool glm_dsa_op_timing_enabled = skippy_glm_dsa_op_timing_enabled();
+    const bool glm_dsa_tensor_trace_enabled = skippy_glm_dsa_tensor_trace_enabled();
+    if (model->arch == LLM_ARCH_GLM_DSA && (glm_dsa_op_timing_enabled || glm_dsa_tensor_trace_enabled)) {
         stage_model->glm_dsa_timing.enabled = true;
+        stage_model->glm_dsa_timing.print_timing = glm_dsa_op_timing_enabled;
+        stage_model->glm_dsa_timing.trace_tensors = glm_dsa_tensor_trace_enabled;
+        stage_model->glm_dsa_timing.trace_value_limit =
+                skippy_env_u32("SKIPPY_GLM_DSA_TENSOR_TRACE_VALUES", 8, 0, 64);
+        stage_model->glm_dsa_timing.trace_node_limit =
+                skippy_env_u32("SKIPPY_GLM_DSA_TENSOR_TRACE_NODES", 32, 1, 1024);
         stage_model->glm_dsa_timing.stage_index = config != nullptr ? config->stage_index : -1;
         params.cb_eval = skippy_glm_dsa_op_timing_cb;
         params.cb_eval_user_data = stage_model;
