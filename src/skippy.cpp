@@ -64,13 +64,16 @@ struct skippy_glm_dsa_op_timing {
     bool enabled = false;
     bool print_timing = false;
     bool trace_tensors = false;
+    bool trace_stats = false;
     int32_t stage_index = -1;
     size_t token_count = 0;
     skippy_glm_dsa_op_kind pending_kind = SKIPPY_GLM_DSA_OP_UNKNOWN;
     int64_t pending_start_us = 0;
     uint32_t trace_value_limit = 8;
     uint32_t trace_node_limit = 32;
+    uint32_t trace_stats_max_bytes = 32 * 1024 * 1024;
     uint32_t trace_nodes = 0;
+    std::string trace_filter;
     skippy_glm_dsa_op_stat stats[SKIPPY_GLM_DSA_OP_COUNT] = {};
 };
 
@@ -1458,6 +1461,10 @@ static bool skippy_glm_dsa_tensor_trace_enabled() {
     return skippy_env_enabled("SKIPPY_GLM_DSA_TENSOR_TRACE");
 }
 
+static bool skippy_glm_dsa_tensor_trace_stats_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_TENSOR_TRACE_STATS");
+}
+
 static bool skippy_name_starts_with(const char * name, const char * prefix) {
     return name != nullptr && std::strncmp(name, prefix, std::strlen(prefix)) == 0;
 }
@@ -1519,6 +1526,29 @@ static bool skippy_glm_dsa_tensor_has_buffer(const ggml_tensor * tensor) {
            (tensor->view_src != nullptr ? tensor->view_src->buffer : tensor->buffer) != nullptr;
 }
 
+static bool skippy_glm_dsa_trace_filter_matches(const std::string & filter, const char * name) {
+    if (filter.empty()) {
+        return true;
+    }
+    if (name == nullptr || name[0] == '\0') {
+        return false;
+    }
+
+    size_t start = 0;
+    while (start <= filter.size()) {
+        const size_t end = filter.find(',', start);
+        const size_t len = (end == std::string::npos ? filter.size() : end) - start;
+        if (len > 0 && std::string(name).find(filter.substr(start, len)) != std::string::npos) {
+            return true;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
 static void skippy_glm_dsa_trace_tensor_values(const ggml_tensor * tensor, uint32_t limit) {
     const size_t value_count = static_cast<size_t>(
             std::min<int64_t>(static_cast<int64_t>(limit), std::max<int64_t>(0, ggml_nelements(tensor))));
@@ -1575,11 +1605,95 @@ static void skippy_glm_dsa_trace_tensor_values(const ggml_tensor * tensor, uint3
     std::fprintf(stderr, "]");
 }
 
+static uint64_t skippy_glm_dsa_fnv1a64(const uint8_t * data, size_t size) {
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<uint64_t>(data[i]);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static void skippy_glm_dsa_trace_numeric_stats_from_f32(const float * values, size_t count) {
+    double sum = 0.0;
+    double max_abs = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        const double value = static_cast<double>(values[i]);
+        sum += value;
+        max_abs = std::max(max_abs, std::fabs(value));
+    }
+    const double mean = count == 0 ? 0.0 : sum / static_cast<double>(count);
+    std::fprintf(stderr,
+            " count=%zu sum=%.17g mean=%.17g max_abs=%.17g",
+            count,
+            sum,
+            mean,
+            max_abs);
+}
+
+static void skippy_glm_dsa_trace_tensor_stats(const ggml_tensor * tensor, uint32_t max_bytes) {
+    if (!skippy_glm_dsa_tensor_has_buffer(tensor)) {
+        std::fprintf(stderr, " stats=unallocated");
+        return;
+    }
+
+    const size_t nbytes = ggml_nbytes(tensor);
+    if (nbytes > static_cast<size_t>(max_bytes)) {
+        std::fprintf(stderr, " stats=skipped:nbytes>%u", max_bytes);
+        return;
+    }
+
+    std::vector<uint8_t> raw(nbytes);
+    ggml_backend_tensor_get(tensor, raw.data(), 0, nbytes);
+    const uint64_t hash = skippy_glm_dsa_fnv1a64(raw.data(), raw.size());
+    std::fprintf(stderr, " stats=fnv64:%016llx", static_cast<unsigned long long>(hash));
+
+    const size_t count = static_cast<size_t>(std::max<int64_t>(0, ggml_nelements(tensor)));
+    switch (tensor->type) {
+        case GGML_TYPE_F32:
+            skippy_glm_dsa_trace_numeric_stats_from_f32(reinterpret_cast<const float *>(raw.data()), count);
+            break;
+        case GGML_TYPE_F16:
+        case GGML_TYPE_BF16: {
+            const ggml_type_traits * traits = ggml_get_type_traits(tensor->type);
+            if (traits == nullptr || traits->to_float == nullptr) {
+                break;
+            }
+            std::vector<float> values(count);
+            traits->to_float(raw.data(), values.data(), count);
+            skippy_glm_dsa_trace_numeric_stats_from_f32(values.data(), count);
+            break;
+        }
+        case GGML_TYPE_I32: {
+            double sum = 0.0;
+            double max_abs = 0.0;
+            const int32_t * values = reinterpret_cast<const int32_t *>(raw.data());
+            for (size_t i = 0; i < count; ++i) {
+                const double value = static_cast<double>(values[i]);
+                sum += value;
+                max_abs = std::max(max_abs, std::fabs(value));
+            }
+            const double mean = count == 0 ? 0.0 : sum / static_cast<double>(count);
+            std::fprintf(stderr,
+                    " count=%zu sum=%.17g mean=%.17g max_abs=%.17g",
+                    count,
+                    sum,
+                    mean,
+                    max_abs);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static void skippy_glm_dsa_trace_tensor(
         skippy_glm_dsa_op_timing & timing,
         skippy_glm_dsa_op_kind kind,
         const ggml_tensor * tensor) {
-    if (!timing.trace_tensors || timing.trace_nodes >= timing.trace_node_limit) {
+    if (!timing.trace_tensors ||
+            timing.trace_nodes >= timing.trace_node_limit ||
+            !skippy_glm_dsa_trace_filter_matches(timing.trace_filter, tensor->name)) {
         return;
     }
 
@@ -1603,6 +1717,9 @@ static void skippy_glm_dsa_trace_tensor(
             ggml_is_contiguous(tensor) ? 1 : 0,
             ggml_nbytes(tensor));
     skippy_glm_dsa_trace_tensor_values(tensor, timing.trace_value_limit);
+    if (timing.trace_stats) {
+        skippy_glm_dsa_trace_tensor_stats(tensor, timing.trace_stats_max_bytes);
+    }
     std::fprintf(stderr, "\n");
 }
 
@@ -1668,17 +1785,23 @@ static void skippy_glm_dsa_op_timing_begin(skippy_session * session, size_t toke
     const bool enabled = timing.enabled;
     const bool print_timing = timing.print_timing;
     const bool trace_tensors = timing.trace_tensors;
+    const bool trace_stats = timing.trace_stats;
     const int32_t stage_index = timing.stage_index;
     const uint32_t trace_value_limit = timing.trace_value_limit;
     const uint32_t trace_node_limit = timing.trace_node_limit;
+    const uint32_t trace_stats_max_bytes = timing.trace_stats_max_bytes;
+    const std::string trace_filter = timing.trace_filter;
     timing = {};
     timing.enabled = enabled;
     timing.print_timing = print_timing;
     timing.trace_tensors = trace_tensors;
+    timing.trace_stats = trace_stats;
     timing.stage_index = stage_index;
     timing.token_count = token_count;
     timing.trace_value_limit = trace_value_limit;
     timing.trace_node_limit = trace_node_limit;
+    timing.trace_stats_max_bytes = trace_stats_max_bytes;
+    timing.trace_filter = trace_filter;
 }
 
 static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
@@ -3129,10 +3252,16 @@ static enum skippy_status skippy_finish_model_open(
         stage_model->glm_dsa_timing.enabled = true;
         stage_model->glm_dsa_timing.print_timing = glm_dsa_op_timing_enabled;
         stage_model->glm_dsa_timing.trace_tensors = glm_dsa_tensor_trace_enabled;
+        stage_model->glm_dsa_timing.trace_stats = skippy_glm_dsa_tensor_trace_stats_enabled();
         stage_model->glm_dsa_timing.trace_value_limit =
                 skippy_env_u32("SKIPPY_GLM_DSA_TENSOR_TRACE_VALUES", 8, 0, 64);
         stage_model->glm_dsa_timing.trace_node_limit =
                 skippy_env_u32("SKIPPY_GLM_DSA_TENSOR_TRACE_NODES", 32, 1, 1024);
+        stage_model->glm_dsa_timing.trace_stats_max_bytes =
+                skippy_env_u32("SKIPPY_GLM_DSA_TENSOR_TRACE_STATS_MAX_BYTES", 32 * 1024 * 1024, 0, 1024 * 1024 * 1024);
+        if (const char * trace_filter = std::getenv("SKIPPY_GLM_DSA_TENSOR_TRACE_FILTER")) {
+            stage_model->glm_dsa_timing.trace_filter = trace_filter;
+        }
         stage_model->glm_dsa_timing.stage_index = config != nullptr ? config->stage_index : -1;
         params.cb_eval = skippy_glm_dsa_op_timing_cb;
         params.cb_eval_user_data = stage_model;
