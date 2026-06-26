@@ -6654,18 +6654,33 @@ struct test_dsa_sparse_attn : public test_case {
     const int64_t n_stream;
     const int64_t n_top_k;
     const int64_t n_top_stream;
+    const bool dense_equiv;
+    const bool graph_equiv;
 
     std::string vars() override {
-        return VARS_TO_STR10(type_k, type_v, type_mask, dk, dv, n_kv, n_batch, n_head, n_stream, n_top_k);
+        return VARS_TO_STR13(type_k, type_v, type_mask, dk, dv, n_kv, n_batch, n_head, n_stream, n_top_k, n_top_stream, dense_equiv, graph_equiv);
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        if ((dense_equiv || graph_equiv) && t->op == GGML_OP_SUB) {
+            return ggml_op_name(GGML_OP_DSA_SPARSE_ATTN);
+        }
+        return ggml_op_desc(t);
     }
 
     test_dsa_sparse_attn(ggml_type type_k = GGML_TYPE_F16, ggml_type type_v = GGML_TYPE_F16, ggml_type type_mask = GGML_TYPE_F16,
             int64_t dk = 16, int64_t dv = 12, int64_t n_kv = 33, int64_t n_batch = 2,
-            int64_t n_head = 4, int64_t n_stream = 1, int64_t n_top_k = 4, int64_t n_top_stream = 1)
+            int64_t n_head = 4, int64_t n_stream = 1, int64_t n_top_k = 4, int64_t n_top_stream = 1, bool dense_equiv = false,
+            bool graph_equiv = false)
         : type_k(type_k), type_v(type_v), type_mask(type_mask), dk(dk), dv(dv), n_kv(n_kv),
-          n_batch(n_batch), n_head(n_head), n_stream(n_stream), n_top_k(n_top_k), n_top_stream(n_top_stream) {}
+          n_batch(n_batch), n_head(n_head), n_stream(n_stream), n_top_k(n_top_k), n_top_stream(n_top_stream),
+          dense_equiv(dense_equiv), graph_equiv(graph_equiv) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
+        if (graph_equiv) {
+            return build_graph_equiv_graph(ctx);
+        }
+
         ggml_tensor * q       = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, dk, n_batch, n_head, n_stream);
         ggml_tensor * k       = ggml_new_tensor_4d(ctx, type_k,         dk, n_kv,    1,      n_stream);
         ggml_tensor * v       = ggml_new_tensor_4d(ctx, type_v,         dv, n_kv,    1,      n_stream);
@@ -6678,7 +6693,9 @@ struct test_dsa_sparse_attn : public test_case {
         ggml_set_name(kq_mask, "kq_mask");
         ggml_set_name(top_k,   "top_k");
 
-        ggml_tensor * out = ggml_dsa_sparse_attn(ctx, q, k, v, kq_mask, top_k, scale());
+        ggml_tensor * out = dense_equiv
+            ? build_dense_equiv_graph(ctx, q, k, v, kq_mask, top_k)
+            : ggml_dsa_sparse_attn(ctx, q, k, v, kq_mask, top_k, scale());
         ggml_set_name(out, "out");
         return out;
     }
@@ -6686,7 +6703,11 @@ struct test_dsa_sparse_attn : public test_case {
     void initialize_tensors(ggml_context * ctx) override {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
             if (strcmp(t->name, "q") == 0) {
-                init_q(t);
+                if (graph_equiv) {
+                    init_q_graph(t);
+                } else {
+                    init_q(t);
+                }
             } else if (strcmp(t->name, "k") == 0) {
                 init_k(t);
             } else if (strcmp(t->name, "v") == 0) {
@@ -6704,6 +6725,15 @@ struct test_dsa_sparse_attn : public test_case {
     double err(const float * a, const float * b, size_t n) override {
         if (n != (size_t) (dv * n_batch * n_head * n_stream)) {
             return 1.0;
+        }
+
+        if (dense_equiv || graph_equiv) {
+            double err = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                err = std::max(err, (double) std::abs(a[i]));
+                err = std::max(err, (double) std::abs(b[i]));
+            }
+            return err;
         }
 
         double err = 0.0;
@@ -6724,6 +6754,12 @@ struct test_dsa_sparse_attn : public test_case {
 
     double max_err(ggml_backend_t backend) override {
         (void) backend;
+        if (graph_equiv && type_k == GGML_TYPE_F32 && type_v == GGML_TYPE_F32 && type_mask == GGML_TYPE_F32 && dk >= 512) {
+            return 2e-4;
+        }
+        if (graph_equiv && (type_k == GGML_TYPE_F16 || type_v == GGML_TYPE_F16 || type_mask == GGML_TYPE_F16)) {
+            return 5e-3;
+        }
         return type_k == GGML_TYPE_F16 || type_v == GGML_TYPE_F16 || type_mask == GGML_TYPE_F16 ? 2e-3 : 1e-5;
     }
 
@@ -6738,6 +6774,93 @@ struct test_dsa_sparse_attn : public test_case {
 private:
     float scale() const {
         return 1.0f / sqrtf((float) dk);
+    }
+
+    ggml_tensor * build_graph_equiv_graph(ggml_context * ctx) {
+        ggml_tensor * q       = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, dk, n_head, n_batch*n_stream, 1);
+        ggml_tensor * k       = ggml_new_tensor_4d(ctx, type_k,         dk, 1,       n_kv, n_stream);
+        ggml_tensor * v       = ggml_new_tensor_4d(ctx, type_v,         dv, 1,       n_kv, n_stream);
+        ggml_tensor * kq_mask = ggml_new_tensor_4d(ctx, type_mask,      1,  n_kv,    n_batch, n_stream);
+        ggml_tensor * top_k   = ggml_new_tensor_4d(ctx, GGML_TYPE_I32,  n_top_k, n_batch, n_top_stream, 1);
+        ggml_tensor * v_mla   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,  dv, dv);
+
+        ggml_set_name(q,       "q");
+        ggml_set_name(k,       "k");
+        ggml_set_name(v,       "v");
+        ggml_set_name(kq_mask, "kq_mask");
+        ggml_set_name(top_k,   "top_k");
+        ggml_set_name(v_mla,   "v_mla");
+
+        const bool v_trans = v->nb[1] > v->nb[2];
+
+        ggml_tensor * q_graph = ggml_view_4d(ctx, q, q->ne[0], q->ne[1], q->ne[2]/n_stream, n_stream,
+                q->nb[1], q->nb[2], q->nb[3]/n_stream, 0);
+        q_graph = ggml_permute(ctx, q_graph, 0, 2, 1, 3);
+        ggml_tensor * k_graph = ggml_permute(ctx, k, 0, 2, 1, 3);
+        ggml_tensor * v_graph = ggml_permute(ctx, v, 0, 2, 1, 3);
+
+        ggml_tensor * sparse = ggml_dsa_sparse_attn(ctx, q_graph, k_graph, v_graph, kq_mask, top_k, scale());
+        sparse = ggml_mul_mat(ctx, v_mla, sparse);
+        sparse = ggml_permute(ctx, sparse, 0, 2, 1, 3);
+        sparse = ggml_cont_2d(ctx, sparse, sparse->ne[0]*sparse->ne[1], sparse->ne[2]*sparse->ne[3]);
+        ggml_set_name(sparse, "sparse_graph");
+
+        ggml_tensor * dense_mask = ggml_dsa_sparse_mask(ctx, kq_mask, top_k);
+        dense_mask = ggml_view_4d(ctx, dense_mask,
+                dense_mask->ne[1], dense_mask->ne[2], 1, dense_mask->ne[3],
+                dense_mask->nb[2], dense_mask->nb[3], dense_mask->nb[3], 0);
+
+        ggml_tensor * kq = ggml_mul_mat(ctx, k_graph, q_graph);
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        kq = ggml_soft_max_ext(ctx, kq, dense_mask, scale(), 0.0f);
+
+        ggml_tensor * v_dense = v_graph;
+        if (!v_trans) {
+            v_dense = ggml_cont(ctx, ggml_transpose(ctx, v_graph));
+        }
+
+        ggml_tensor * dense = ggml_mul_mat(ctx, v_dense, kq);
+        dense = ggml_mul_mat(ctx, v_mla, dense);
+        dense = ggml_permute(ctx, dense, 0, 2, 1, 3);
+        dense = ggml_cont_2d(ctx, dense, dense->ne[0]*dense->ne[1], dense->ne[2]*dense->ne[3]);
+        ggml_set_name(dense, "dense_graph");
+
+        return ggml_sub(ctx, sparse, dense);
+    }
+
+    ggml_tensor * build_dense_equiv_graph(
+            ggml_context * ctx,
+            ggml_tensor  * q,
+            ggml_tensor  * k,
+            ggml_tensor  * v,
+            ggml_tensor  * kq_mask,
+            ggml_tensor  * top_k) const {
+        ggml_tensor * sparse = ggml_dsa_sparse_attn(ctx, q, k, v, kq_mask, top_k, scale());
+        ggml_set_name(sparse, "sparse");
+
+        ggml_tensor * dense_mask = ggml_dsa_sparse_mask(ctx, kq_mask, top_k);
+        dense_mask = ggml_view_4d(ctx, dense_mask,
+                dense_mask->ne[1], dense_mask->ne[2], 1, dense_mask->ne[3],
+                dense_mask->nb[2], dense_mask->nb[3], dense_mask->nb[3], 0);
+        ggml_set_name(dense_mask, "dense_mask");
+
+        ggml_tensor * kq = ggml_mul_mat(ctx, k, q);
+        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+        ggml_set_name(kq, "dense_kq");
+
+        kq = ggml_soft_max_ext(ctx, kq, dense_mask, scale(), 0.0f);
+        ggml_set_name(kq, "dense_softmax");
+
+        ggml_tensor * v_dense = v;
+        if (!(v->nb[1] > v->nb[2])) {
+            v_dense = ggml_cont(ctx, ggml_transpose(ctx, v));
+            ggml_set_name(v_dense, "dense_v_cont");
+        }
+
+        ggml_tensor * dense = ggml_mul_mat(ctx, v_dense, kq);
+        ggml_set_name(dense, "dense");
+
+        return ggml_sub(ctx, sparse, dense);
     }
 
     float q_value(int64_t i_dk, int64_t i_batch, int64_t i_head, int64_t i_stream) const {
@@ -6768,6 +6891,21 @@ private:
                 for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
                     for (int64_t i_dk = 0; i_dk < dk; ++i_dk) {
                         const size_t idx = ((i_stream*n_head + i_head)*n_batch + i_batch)*dk + i_dk;
+                        data[idx] = q_value(i_dk, i_batch, i_head, i_stream);
+                    }
+                }
+            }
+        }
+        ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
+    }
+
+    void init_q_graph(ggml_tensor * t) const {
+        std::vector<float> data(ggml_nelements(t));
+        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
+            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
+                for (int64_t i_head = 0; i_head < n_head; ++i_head) {
+                    for (int64_t i_dk = 0; i_dk < dk; ++i_dk) {
+                        const size_t idx = ((i_stream*n_batch + i_batch)*n_head + i_head)*dk + i_dk;
                         data[idx] = q_value(i_dk, i_batch, i_head, i_stream);
                     }
                 }
@@ -9600,6 +9738,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 16, 12, 33, 2, 4, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 16, 12, 33, 2, 4, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 32, 24, 65, 4, 8, 2, 8, 2));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 16, 12, 33, 2, 4, 1, 4, 1, true));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 32, 24, 65, 4, 8, 2, 8, 2, true));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 16, 12, 33, 2, 4, 1, 4, 1, false, true));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 32, 24, 65, 4, 8, 2, 8, 2, false, true));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 576, 512, 257, 1, 4, 1, 64, 1, false, true));
 
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));

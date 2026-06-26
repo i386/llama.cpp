@@ -1473,6 +1473,9 @@ static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * nam
     if (skippy_name_starts_with(name, "dsa_sparse_mask")) {
         return SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD;
     }
+    if (skippy_name_starts_with(name, "dsa_sparse_attn")) {
+        return SKIPPY_GLM_DSA_OP_MLA_ATTENTION;
+    }
     if (skippy_name_starts_with(name, "kqv_out")) {
         return SKIPPY_GLM_DSA_OP_MLA_ATTENTION;
     }

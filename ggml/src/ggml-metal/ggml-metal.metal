@@ -9480,6 +9480,137 @@ kernel void kernel_dsa_sparse_mask_set(
     }
 }
 
+template<typename K, typename V, typename M>
+kernel void kernel_dsa_sparse_attn_impl(
+        constant ggml_metal_kargs_dsa_sparse_attn & args,
+        device const char    * q,
+        device const char    * k,
+        device const char    * v,
+        device const char    * kq_mask,
+        device const int32_t * top_k,
+        device       char    * dst,
+        uint3                 tgpig [[threadgroup_position_in_grid]],
+        uint                  tiitg [[thread_index_in_threadgroup]],
+        uint3                 tptg  [[threads_per_threadgroup]]) {
+    constexpr int32_t DSA_SPARSE_ATTN_MAX_TOP_K = 4096;
+    constexpr int32_t DSA_SPARSE_ATTN_MAX_THREADS = 256;
+
+    threadgroup float scores[DSA_SPARSE_ATTN_MAX_TOP_K];
+    threadgroup float reduce[DSA_SPARSE_ATTN_MAX_THREADS];
+
+    const int32_t i_batch  = tgpig.x;
+    const int32_t i_head   = tgpig.y;
+    const int32_t i_stream = tgpig.z;
+    const int32_t tid      = tiitg;
+    const int32_t nth      = tptg.x;
+
+    if (i_batch >= args.ne1 || i_head >= args.ne2 || i_stream >= args.ne3 || args.ne40 > DSA_SPARSE_ATTN_MAX_TOP_K) {
+        return;
+    }
+
+    const int32_t n_head_per_kv = args.ne2/args.ne12;
+    const int32_t n_head_per_v  = args.ne2/args.ne22;
+    const int32_t i_kv_head     = i_head/n_head_per_kv;
+    const int32_t i_v_head      = i_head/n_head_per_v;
+    const int32_t i_top_stream  = i_stream%args.ne42;
+
+    float local_max = -FLT_MAX;
+
+    for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+        const int32_t i_kv = ((device const int32_t *) ((device const char *) top_k +
+                i_top*args.nb40 + i_batch*args.nb41 + i_top_stream*args.nb42))[0];
+
+        float score = -FLT_MAX;
+        if (i_kv >= 0 && i_kv < args.ne11) {
+            float qk = 0.0f;
+
+            for (int32_t i_dk = 0; i_dk < args.ne00; ++i_dk) {
+                device const float * q_ptr = (device const float *) (q +
+                        i_dk*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                device const K * k_ptr = (device const K *) (k +
+                        i_dk*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                qk += (*q_ptr) * float(*k_ptr);
+            }
+
+            device const M * mask_ptr = (device const M *) (kq_mask +
+                    i_kv*args.nb31 + i_batch*args.nb32 + i_stream*args.nb33);
+            score = qk*args.scale + float(*mask_ptr);
+        }
+
+        scores[i_top] = score;
+        local_max = max(local_max, score);
+    }
+
+    reduce[tid] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int32_t stride = nth/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[tid] = max(reduce[tid], reduce[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float max_score = reduce[0];
+    float local_sum = 0.0f;
+
+    if (max_score > -FLT_MAX/2) {
+        for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+            scores[i_top] = exp(scores[i_top] - max_score);
+            local_sum += scores[i_top];
+        }
+    } else {
+        for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+            scores[i_top] = 0.0f;
+        }
+    }
+
+    reduce[tid] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int32_t stride = nth/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[tid] += reduce[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float sum_score = reduce[0];
+
+    for (int32_t i_dv = tid; i_dv < args.ne20; i_dv += nth) {
+        float acc = 0.0f;
+
+        if (sum_score > 0.0f && isfinite(sum_score)) {
+            for (int32_t i_top = 0; i_top < args.ne40; ++i_top) {
+                const int32_t i_kv = ((device const int32_t *) ((device const char *) top_k +
+                        i_top*args.nb40 + i_batch*args.nb41 + i_top_stream*args.nb42))[0];
+                if (i_kv < 0 || i_kv >= args.ne11) {
+                    continue;
+                }
+
+                device const V * v_ptr = (device const V *) (v +
+                        i_dv*args.nb20 + i_kv*args.nb21 + i_v_head*args.nb22 + i_stream*args.nb23);
+                acc += (scores[i_top]/sum_score) * float(*v_ptr);
+            }
+        }
+
+        device float * dst_ptr = (device float *) (dst +
+                i_dv*args.nb0 + i_batch*args.nb1 + i_head*args.nb2 + i_stream*args.nb3);
+        *dst_ptr = acc;
+    }
+}
+
+typedef decltype(kernel_dsa_sparse_attn_impl<float, float, float>) kernel_dsa_sparse_attn_t;
+
+template [[host_name("kernel_dsa_sparse_attn_f32_f32_f32")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<float, float, float>;
+template [[host_name("kernel_dsa_sparse_attn_f32_f32_f16")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<float, float, half>;
+template [[host_name("kernel_dsa_sparse_attn_f32_f16_f32")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<float, half,  float>;
+template [[host_name("kernel_dsa_sparse_attn_f32_f16_f16")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<float, half,  half>;
+template [[host_name("kernel_dsa_sparse_attn_f16_f32_f32")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<half,  float, float>;
+template [[host_name("kernel_dsa_sparse_attn_f16_f32_f16")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<half,  float, half>;
+template [[host_name("kernel_dsa_sparse_attn_f16_f16_f32")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<half,  half,  float>;
+template [[host_name("kernel_dsa_sparse_attn_f16_f16_f16")]] kernel kernel_dsa_sparse_attn_t kernel_dsa_sparse_attn_impl<half,  half,  half>;
+
 kernel void kernel_diag_f32(
         constant ggml_metal_kargs_diag & args,
         device   const char * src0,

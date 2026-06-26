@@ -1084,6 +1084,16 @@ struct llm_graph_context {
                   float   kq_scale,
                     int   il) const;
 
+    ggml_tensor * build_attn_mha_dsa_sparse(
+            ggml_tensor * q,
+            ggml_tensor * k,
+            ggml_tensor * v,
+            ggml_tensor * kq_mask_rows,
+            ggml_tensor * top_k,
+            ggml_tensor * v_mla,
+                  float   kq_scale,
+                    int   il) const;
+
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 
     ggml_tensor * build_attn(

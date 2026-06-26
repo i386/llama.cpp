@@ -1279,6 +1279,32 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->ne[1] == op->src[0]->ne[1] &&
                    op->ne[2] == op->src[0]->ne[2] &&
                    op->ne[3] == op->src[0]->ne[3];
+        case GGML_OP_DSA_SPARSE_ATTN:
+            return op->type == GGML_TYPE_F32 &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   (op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16) &&
+                   (op->src[2]->type == GGML_TYPE_F32 || op->src[2]->type == GGML_TYPE_F16) &&
+                   (op->src[3]->type == GGML_TYPE_F32 || op->src[3]->type == GGML_TYPE_F16) &&
+                   op->src[4]->type == GGML_TYPE_I32 &&
+                   op->src[0]->nb[0] == sizeof(float) &&
+                   op->src[1]->nb[0] == ggml_type_size(op->src[1]->type) &&
+                   op->src[2]->nb[0] == ggml_type_size(op->src[2]->type) &&
+                   op->src[3]->ne[0] == 1 &&
+                   op->src[3]->ne[1] == op->src[1]->ne[1] &&
+                   op->src[3]->ne[2] == op->src[0]->ne[1] &&
+                   op->src[3]->ne[3] == op->src[0]->ne[3] &&
+                   op->src[4]->ne[0] <= 4096 &&
+                   op->src[4]->ne[1] == op->src[0]->ne[1] &&
+                   op->src[0]->ne[3] % op->src[4]->ne[2] == 0 &&
+                   op->src[4]->ne[3] == 1 &&
+                   op->src[0]->ne[0] == op->src[1]->ne[0] &&
+                   op->src[1]->ne[1] == op->src[2]->ne[1] &&
+                   op->src[0]->ne[2] % op->src[1]->ne[2] == 0 &&
+                   op->src[0]->ne[2] % op->src[2]->ne[2] == 0 &&
+                   op->ne[0] == op->src[2]->ne[0] &&
+                   op->ne[1] == op->src[0]->ne[1] &&
+                   op->ne[2] == op->src[0]->ne[2] &&
+                   op->ne[3] == op->src[0]->ne[3];
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:

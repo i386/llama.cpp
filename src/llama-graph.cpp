@@ -25,9 +25,17 @@ static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
 static thread_local skippy_activation_gemma3n_altup g_skippy_gemma3n_altup;
 static thread_local skippy_activation_glm_dsa_top_k g_skippy_glm_dsa_top_k;
 
-static bool skippy_glm_dsa_fused_sparse_mask_enabled() {
-    const char * value = getenv("SKIPPY_GLM_DSA_ENABLE_FUSED_SPARSE_MASK");
+static bool skippy_env_enabled(const char * name) {
+    const char * value = getenv(name);
     return value != nullptr && strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
+}
+
+static bool skippy_glm_dsa_fused_sparse_mask_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_FUSED_SPARSE_MASK");
+}
+
+static bool skippy_glm_dsa_direct_sparse_attn_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN");
 }
 
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
@@ -2372,6 +2380,43 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     return cur;
 }
 
+ggml_tensor * llm_graph_context::build_attn_mha_dsa_sparse(
+         ggml_tensor * q,
+         ggml_tensor * k,
+         ggml_tensor * v,
+         ggml_tensor * kq_mask_rows,
+         ggml_tensor * top_k,
+         ggml_tensor * v_mla,
+               float   kq_scale,
+                 int   il) const {
+    const bool v_trans = v->nb[1] > v->nb[2];
+
+    const auto n_stream = k->ne[3];
+
+    q = ggml_view_4d(ctx0, q, q->ne[0], q->ne[1], q->ne[2]/n_stream, n_stream, q->nb[1], q->nb[2], q->nb[3]/n_stream, 0);
+
+    q = ggml_permute(ctx0, q, 0, 2, 1, 3);
+    k = ggml_permute(ctx0, k, 0, 2, 1, 3);
+    v = ggml_permute(ctx0, v, 0, 2, 1, 3);
+
+    GGML_UNUSED(v_trans);
+
+    ggml_tensor * cur = ggml_dsa_sparse_attn(ctx0, q, k, v, kq_mask_rows, top_k, kq_scale);
+    cb(cur, "dsa_sparse_attn", il);
+
+    if (v_mla) {
+        cur = ggml_mul_mat(ctx0, v_mla, cur);
+        cb(cur, "kqv_mla", il);
+    }
+
+    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+    cur = ggml_cont_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+
+    ggml_build_forward_expand(gf, cur);
+
+    return cur;
+}
+
 llm_graph_input_attn_no_cache * llm_graph_context::build_attn_inp_no_cache() const {
     auto inp = std::make_unique<llm_graph_input_attn_no_cache>(hparams, cparams);
 
@@ -2686,6 +2731,32 @@ ggml_tensor * llm_graph_context::build_attn(
     // reshape top_k indices: [n_top_k, n_batch, 1, n_stream] -> [n_top_k, n_batch, n_stream, 1]
     ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[3], top_k->nb[2], 0);
 
+    ggml_tensor * q = q_cur;
+    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+
+    const bool use_direct_sparse_attn =
+            skippy_glm_dsa_direct_sparse_attn_enabled() &&
+            kq_b == nullptr &&
+            sinks == nullptr &&
+            hparams.f_max_alibi_bias == 0.0f &&
+            !hparams.attn_soft_cap;
+
+    if (use_direct_sparse_attn) {
+        ggml_tensor * cur = build_attn_mha_dsa_sparse(q, k, v, kq_mask_rows, top_k_3d, v_mla, kq_scale, il);
+        cb(cur, "kqv_out", il);
+
+        if (wo) {
+            cur = build_lora_mm(wo, cur, wo_s);
+        }
+
+        if (wo_b) {
+            cur = ggml_add(ctx0, cur, wo_b);
+        }
+
+        return cur;
+    }
+
     ggml_tensor * kq_mask_top_k = nullptr;
     if (skippy_glm_dsa_fused_sparse_mask_enabled()) {
         kq_mask_top_k = ggml_dsa_sparse_mask(ctx0, kq_mask_rows, top_k_3d);
@@ -2710,10 +2781,6 @@ ggml_tensor * llm_graph_context::build_attn(
     // reshape to restore the original shape of KQ mask:
     // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]
     kq_mask_top_k = ggml_view_4d(ctx0, kq_mask_top_k, kq_mask_top_k->ne[1], kq_mask_top_k->ne[2], 1, kq_mask_top_k->ne[3], kq_mask_top_k->nb[2], kq_mask_top_k->nb[3], kq_mask_top_k->nb[3], 0);
-
-    ggml_tensor * q = q_cur;
-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, sinks, v_mla, kq_scale, il);
     cb(cur, "kqv_out", il);
