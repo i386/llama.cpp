@@ -68,6 +68,7 @@ struct skippy_runtime_config {
     enum skippy_load_mode load_mode;
 
     bool disable_repack;
+    bool use_mmap;
     bool filter_tensors_on_load;
     bool include_embeddings;
     bool include_output;

@@ -3356,6 +3356,7 @@ static enum skippy_status skippy_model_open_impl(
     llama_model_params params = llama_model_default_params();
     if (config != nullptr) {
         params.n_gpu_layers = config->n_gpu_layers;
+        params.use_mmap = config->use_mmap;
         if (config->disable_repack || config->filter_tensors_on_load) {
             params.use_extra_bufts = false;
         }
@@ -3441,6 +3442,7 @@ static enum skippy_status skippy_model_open_from_parts_impl(
     llama_model_params params = llama_model_default_params();
     if (config != nullptr) {
         params.n_gpu_layers = config->n_gpu_layers;
+        params.use_mmap = config->use_mmap;
         if (config->disable_repack || config->filter_tensors_on_load) {
             params.use_extra_bufts = false;
         }
