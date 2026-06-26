@@ -9532,7 +9532,30 @@ kernel void kernel_dsa_sparse_attn_impl(
 
                 float qk = 0.0f;
 
-                for (int32_t i_dk = 0; i_dk < args.ne00; ++i_dk) {
+                int32_t i_dk = 0;
+                for (; i_dk + 3 < args.ne00; i_dk += 4) {
+                    device const float * q0_ptr = (device const float *) (q +
+                            (i_dk + 0)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const float * q1_ptr = (device const float *) (q +
+                            (i_dk + 1)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const float * q2_ptr = (device const float *) (q +
+                            (i_dk + 2)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const float * q3_ptr = (device const float *) (q +
+                            (i_dk + 3)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const K * k0_ptr = (device const K *) (k +
+                            (i_dk + 0)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    device const K * k1_ptr = (device const K *) (k +
+                            (i_dk + 1)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    device const K * k2_ptr = (device const K *) (k +
+                            (i_dk + 2)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    device const K * k3_ptr = (device const K *) (k +
+                            (i_dk + 3)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    qk += (*q0_ptr) * float(*k0_ptr);
+                    qk += (*q1_ptr) * float(*k1_ptr);
+                    qk += (*q2_ptr) * float(*k2_ptr);
+                    qk += (*q3_ptr) * float(*k3_ptr);
+                }
+                for (; i_dk < args.ne00; ++i_dk) {
                     device const float * q_ptr = (device const float *) (q +
                             i_dk*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
                     device const K * k_ptr = (device const K *) (k +
