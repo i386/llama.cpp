@@ -38,6 +38,20 @@ static bool skippy_glm_dsa_direct_sparse_attn_enabled() {
     return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN");
 }
 
+static bool skippy_glm_dsa_direct_sparse_prefill_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL");
+}
+
+static int64_t skippy_glm_dsa_direct_sparse_prefill_max_tokens() {
+    const char * value = getenv("SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MAX_TOKENS");
+    if (value == nullptr || value[0] == '\0') {
+        return 32;
+    }
+
+    const int64_t parsed = atoll(value);
+    return parsed <= 0 ? INT64_MAX : parsed;
+}
+
 void skippy_graph_set_filter(const skippy_graph_filter & filter) {
     g_skippy_graph_filter = filter;
 }
@@ -2735,8 +2749,22 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
+    const int64_t n_direct_sparse_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
+    const int64_t n_direct_sparse_batch = top_k_3d->ne[1];
+    const bool direct_sparse_decode_shape =
+            n_direct_sparse_stream > 0 &&
+            n_direct_sparse_batch == 1 &&
+            ubatch.n_tokens == n_direct_sparse_stream;
+    const bool direct_sparse_prefill_shape =
+            skippy_glm_dsa_direct_sparse_prefill_enabled() &&
+            n_direct_sparse_batch <= skippy_glm_dsa_direct_sparse_prefill_max_tokens();
+    const bool direct_sparse_token_shape_allowed =
+            direct_sparse_decode_shape ||
+            direct_sparse_prefill_shape;
+
     const bool use_direct_sparse_attn =
             skippy_glm_dsa_direct_sparse_attn_enabled() &&
+            direct_sparse_token_shape_allowed &&
             kq_b == nullptr &&
             sinks == nullptr &&
             hparams.f_max_alibi_bias == 0.0f &&
