@@ -48,10 +48,11 @@ enum skippy_glm_dsa_op_kind {
     SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL = 1,
     SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK = 2,
     SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD = 3,
-    SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 4,
-    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 5,
-    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 6,
-    SKIPPY_GLM_DSA_OP_COUNT = 7,
+    SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN = 4,
+    SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 5,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 6,
+    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 7,
+    SKIPPY_GLM_DSA_OP_COUNT = 8,
     SKIPPY_GLM_DSA_OP_UNKNOWN = 255,
 };
 
@@ -1479,6 +1480,8 @@ static const char * skippy_glm_dsa_op_name(skippy_glm_dsa_op_kind kind) {
             return "sparse_mask_topk";
         case SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD:
             return "sparse_mask_add";
+        case SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN:
+            return "dsa_sparse_attn";
         case SKIPPY_GLM_DSA_OP_MLA_ATTENTION:
             return "mla_attention";
         case SKIPPY_GLM_DSA_OP_ROUTED_MOE:
@@ -1506,7 +1509,7 @@ static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * nam
         return SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD;
     }
     if (skippy_name_starts_with(name, "dsa_sparse_attn")) {
-        return SKIPPY_GLM_DSA_OP_MLA_ATTENTION;
+        return SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN;
     }
     if (skippy_name_starts_with(name, "kqv_out")) {
         return SKIPPY_GLM_DSA_OP_MLA_ATTENTION;
@@ -1833,6 +1836,7 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, timing.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_MLA_ATTENTION, timing.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_ROUTED_MOE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SHARED_EXPERT, timing.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
