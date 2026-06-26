@@ -1216,8 +1216,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
 
-    LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, direct_io = %s)\n",
-        __func__, ml.use_mmap ? "true" : "false", ml.use_direct_io ? "true" : "false");
+    LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, mmap_prefetch = %s, direct_io = %s)\n",
+        __func__, ml.use_mmap ? "true" : "false", params.use_mmap_prefetch ? "true" : "false", ml.use_direct_io ? "true" : "false");
 
     // build a list of buffer types for the CPU and GPU devices
     pimpl->cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
@@ -1479,7 +1479,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     LLAMA_LOG_INFO("%s: initializing mappings for %zu model part(s)\n",
         __func__, ml.files.size());
-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    ml.init_mappings(params.use_mmap_prefetch, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     LLAMA_LOG_INFO("%s: initialized %zu mapping(s); creating backend buffers for %zu tensor group(s)\n",
         __func__, ml.mappings.size(), ml.ctx_map.size());
     pimpl->mappings.reserve(ml.mappings.size());
@@ -2292,6 +2292,7 @@ llama_model_params llama_model_default_params() {
         /*.kv_overrides                =*/ nullptr,
         /*.vocab_only                  =*/ false,
         /*.use_mmap                    =*/ true,
+        /*.use_mmap_prefetch           =*/ true,
         /*.use_direct_io               =*/ false,
         /*.use_mlock                   =*/ false,
         /*.check_tensors               =*/ false,

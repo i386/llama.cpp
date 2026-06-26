@@ -69,6 +69,7 @@ struct skippy_runtime_config {
 
     bool disable_repack;
     bool use_mmap;
+    bool use_mmap_prefetch;
     bool filter_tensors_on_load;
     bool include_embeddings;
     bool include_output;
