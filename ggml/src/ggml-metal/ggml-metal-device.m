@@ -1252,13 +1252,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_GATED_DELTA_NET:
             return has_simdgroup_reduction && op->src[2]->ne[0] % 32 == 0;
         case GGML_OP_LIGHTNING_INDEXER:
-            return op->type == GGML_TYPE_F32 &&
+            {
+                const bool k_scalar =
+                    (op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16) &&
+                    op->src[1]->nb[0] == ggml_type_size(op->src[1]->type);
+                const bool k_q4_0 =
+                    op->src[1]->type == GGML_TYPE_Q4_0 &&
+                    op->src[1]->ne[0] % 32 == 0;
+                return op->type == GGML_TYPE_F32 &&
                    op->src[0]->type == GGML_TYPE_F32 &&
                    op->src[2]->type == GGML_TYPE_F32 &&
-                   (op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16) &&
+                   (k_scalar || k_q4_0) &&
                    op->nb[0] == sizeof(float) &&
                    op->src[0]->nb[0] == sizeof(float) &&
-                   op->src[1]->nb[0] == ggml_type_size(op->src[1]->type) &&
                    op->src[2]->nb[0] == sizeof(float) &&
                    op->src[0]->ne[0] == op->src[1]->ne[0] &&
                    op->src[0]->ne[1] == op->src[2]->ne[0] &&
@@ -1267,6 +1273,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->src[2]->ne[2] == 1 &&
                    op->src[0]->ne[3] == op->src[1]->ne[3] &&
                    op->src[1]->ne[3] == op->src[2]->ne[3];
+            }
         case GGML_OP_DSA_SPARSE_MASK:
             return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16) &&
                    op->src[0]->type == op->type &&

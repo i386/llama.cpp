@@ -2866,6 +2866,69 @@ kernel void kernel_lightning_indexer_impl(
 
 typedef decltype(kernel_lightning_indexer_impl<float>) kernel_lightning_indexer_t;
 
+inline float lightning_indexer_q4_0_value(
+        constant ggml_metal_kargs_lightning_indexer & args,
+        device const char * k,
+        int i_embd,
+        int i_kv,
+        int i_stream) {
+    device const block_q4_0 * k_row = (device const block_q4_0 *) (k + i_kv*args.nb12 + i_stream*args.nb13);
+
+    device const block_q4_0 * k_block = k_row + i_embd/32;
+    const int i_q = i_embd & 31;
+    const uchar packed = k_block->qs[i_q & 15];
+    const int q4 = (i_q < 16 ? (packed & 0x0f) : (packed >> 4)) - 8;
+
+    return float(q4) * float(k_block->d);
+}
+
+kernel void kernel_lightning_indexer_q4_0(
+        constant ggml_metal_kargs_lightning_indexer & args,
+        device const char * q,
+        device const char * k,
+        device const char * weights,
+        device       char * dst,
+        uint3 gid[[thread_position_in_grid]]) {
+    const int i_kv     = gid.x;
+    const int i_batch  = gid.y;
+    const int i_stream = gid.z;
+
+    if (i_kv >= args.ne0 || i_batch >= args.ne1 || i_stream >= args.ne3) {
+        return;
+    }
+
+    float score = 0.0f;
+
+    for (int i_head = 0; i_head < args.ne01; ++i_head) {
+        float qk = 0.0f;
+
+        int i_embd = 0;
+        for (; i_embd + 7 < args.ne00; i_embd += 8) {
+            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+
+            qk += q_ptr[0] * lightning_indexer_q4_0_value(args, k, i_embd + 0, i_kv, i_stream);
+            qk += q_ptr[1] * lightning_indexer_q4_0_value(args, k, i_embd + 1, i_kv, i_stream);
+            qk += q_ptr[2] * lightning_indexer_q4_0_value(args, k, i_embd + 2, i_kv, i_stream);
+            qk += q_ptr[3] * lightning_indexer_q4_0_value(args, k, i_embd + 3, i_kv, i_stream);
+            qk += q_ptr[4] * lightning_indexer_q4_0_value(args, k, i_embd + 4, i_kv, i_stream);
+            qk += q_ptr[5] * lightning_indexer_q4_0_value(args, k, i_embd + 5, i_kv, i_stream);
+            qk += q_ptr[6] * lightning_indexer_q4_0_value(args, k, i_embd + 6, i_kv, i_stream);
+            qk += q_ptr[7] * lightning_indexer_q4_0_value(args, k, i_embd + 7, i_kv, i_stream);
+        }
+        for (; i_embd < args.ne00; ++i_embd) {
+            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+
+            qk += *q_ptr * lightning_indexer_q4_0_value(args, k, i_embd, i_kv, i_stream);
+        }
+
+        device const float * weight_ptr = (device const float *) (weights + i_head*args.nb20 + i_batch*args.nb21 + i_stream*args.nb23);
+        score += max(qk * args.scale_embd, 0.0f) * *weight_ptr;
+    }
+
+    device float * dst_ptr = (device float *) (dst + i_kv*args.nb0 + i_batch*args.nb1 + i_stream*args.nb3);
+    *dst_ptr = score * args.scale_heads;
+}
+
 template [[host_name("kernel_lightning_indexer_f32")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<float>;
 template [[host_name("kernel_lightning_indexer_f16")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<half>;
 
