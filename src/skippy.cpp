@@ -44,15 +44,16 @@
 using json = nlohmann::ordered_json;
 
 enum skippy_glm_dsa_op_kind {
-    SKIPPY_GLM_DSA_OP_INDEXER_TOPK = 0,
-    SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL = 1,
-    SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK = 2,
-    SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD = 3,
-    SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN = 4,
-    SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 5,
-    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 6,
-    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 7,
-    SKIPPY_GLM_DSA_OP_COUNT = 8,
+    SKIPPY_GLM_DSA_OP_INDEXER = 0,
+    SKIPPY_GLM_DSA_OP_TOP_K = 1,
+    SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL = 2,
+    SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK = 3,
+    SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD = 4,
+    SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN = 5,
+    SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 6,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 7,
+    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 8,
+    SKIPPY_GLM_DSA_OP_COUNT = 9,
     SKIPPY_GLM_DSA_OP_UNKNOWN = 255,
 };
 
@@ -1472,8 +1473,10 @@ static bool skippy_name_starts_with(const char * name, const char * prefix) {
 
 static const char * skippy_glm_dsa_op_name(skippy_glm_dsa_op_kind kind) {
     switch (kind) {
-        case SKIPPY_GLM_DSA_OP_INDEXER_TOPK:
-            return "indexer_topk";
+        case SKIPPY_GLM_DSA_OP_INDEXER:
+            return "indexer";
+        case SKIPPY_GLM_DSA_OP_TOP_K:
+            return "top_k";
         case SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL:
             return "sparse_mask_fill";
         case SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK:
@@ -1496,8 +1499,11 @@ static const char * skippy_glm_dsa_op_name(skippy_glm_dsa_op_kind kind) {
 }
 
 static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * name) {
-    if (skippy_name_starts_with(name, "indexer_") || skippy_name_starts_with(name, "top_k")) {
-        return SKIPPY_GLM_DSA_OP_INDEXER_TOPK;
+    if (skippy_name_starts_with(name, "top_k")) {
+        return SKIPPY_GLM_DSA_OP_TOP_K;
+    }
+    if (skippy_name_starts_with(name, "indexer_")) {
+        return SKIPPY_GLM_DSA_OP_INDEXER;
     }
     if (skippy_name_starts_with(name, "dsa_sparse_mask_fill")) {
         return SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL;
@@ -1764,6 +1770,15 @@ static skippy_glm_dsa_op_stat skippy_glm_dsa_sparse_mask_stat(const skippy_glm_d
     return stat;
 }
 
+static skippy_glm_dsa_op_stat skippy_glm_dsa_indexer_topk_stat(const skippy_glm_dsa_op_timing & timing) {
+    skippy_glm_dsa_op_stat stat = {};
+    stat.nodes += timing.stats[SKIPPY_GLM_DSA_OP_INDEXER].nodes;
+    stat.nodes += timing.stats[SKIPPY_GLM_DSA_OP_TOP_K].nodes;
+    stat.elapsed_us += timing.stats[SKIPPY_GLM_DSA_OP_INDEXER].elapsed_us;
+    stat.elapsed_us += timing.stats[SKIPPY_GLM_DSA_OP_TOP_K].elapsed_us;
+    return stat;
+}
+
 static void skippy_glm_dsa_print_op_stat(const char * name, const skippy_glm_dsa_op_stat & stat) {
     std::fprintf(stderr,
             " %s_nodes=%llu %s_us=%lld",
@@ -1831,7 +1846,9 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
             timing.stage_index,
             timing.token_count,
             static_cast<long long>(total_us));
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_INDEXER_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_INDEXER_TOPK]);
+    skippy_glm_dsa_print_op_stat("indexer_topk", skippy_glm_dsa_indexer_topk_stat(timing));
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_INDEXER, timing.stats[SKIPPY_GLM_DSA_OP_INDEXER]);
+    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_TOP_K, timing.stats[SKIPPY_GLM_DSA_OP_TOP_K]);
     skippy_glm_dsa_print_op_stat("sparse_mask", skippy_glm_dsa_sparse_mask_stat(timing));
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
     skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
