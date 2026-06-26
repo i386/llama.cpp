@@ -11015,6 +11015,12 @@ void ggml_compute_forward_dsa_sparse_attn(
             const int32_t i_kv = *(const int32_t *) top_k_data;
             GGML_ASSERT(i_kv >= 0 && i_kv < n_kv);
 
+            const float mask = ggml_dsa_sparse_attn_mask_value(src3, i_kv, i_batch, i_stream);
+            if (!isfinite(mask)) {
+                scores[i_top] = -INFINITY;
+                continue;
+            }
+
             const char * k_row = (const char *) src1->data +
                     i_kv * src1->nb[1] + i_kv_head * src1->nb[2] + i_stream * src1->nb[3];
             const float * k_row_data;
@@ -11027,7 +11033,7 @@ void ggml_compute_forward_dsa_sparse_attn(
 
             float qk = 0.0f;
             ggml_vec_dot_f32(dk, &qk, 0, q_row, 0, k_row_data, 0, 1);
-            scores[i_top] = qk * scale + ggml_dsa_sparse_attn_mask_value(src3, i_kv, i_batch, i_stream);
+            scores[i_top] = qk * scale + mask;
             max_score = MAX(max_score, scores[i_top]);
         }
 
@@ -11057,6 +11063,11 @@ void ggml_compute_forward_dsa_sparse_attn(
                     i_top * src4->nb[0] + i_batch * src4->nb[1] + i_top_stream * src4->nb[2];
             const int32_t i_kv = *(const int32_t *) top_k_data;
 
+            const float p = scores[i_top] / sum;
+            if (p == 0.0f) {
+                continue;
+            }
+
             const char * v_row = (const char *) src2->data +
                     i_kv * src2->nb[1] + i_v_head * src2->nb[2] + i_stream * src2->nb[3];
             const float * v_row_data;
@@ -11067,7 +11078,6 @@ void ggml_compute_forward_dsa_sparse_attn(
                 v_row_data = (const float *) v_row;
             }
 
-            const float p = scores[i_top] / sum;
             ggml_vec_mad_f32(dv, dst_row, v_row_data, p);
         }
     }

@@ -9520,21 +9520,25 @@ kernel void kernel_dsa_sparse_attn_impl(
         const int32_t i_kv = ((device const int32_t *) ((device const char *) top_k +
                 i_top*args.nb40 + i_batch*args.nb41 + i_top_stream*args.nb42))[0];
 
-        float score = -FLT_MAX;
+        float score = -INFINITY;
         if (i_kv >= 0 && i_kv < args.ne11) {
-            float qk = 0.0f;
-
-            for (int32_t i_dk = 0; i_dk < args.ne00; ++i_dk) {
-                device const float * q_ptr = (device const float *) (q +
-                        i_dk*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
-                device const K * k_ptr = (device const K *) (k +
-                        i_dk*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
-                qk += (*q_ptr) * float(*k_ptr);
-            }
-
             device const M * mask_ptr = (device const M *) (kq_mask +
                     i_kv*args.nb31 + i_batch*args.nb32 + i_stream*args.nb33);
-            score = qk*args.scale + float(*mask_ptr);
+            const float mask = float(*mask_ptr);
+
+            if (isfinite(mask)) {
+                float qk = 0.0f;
+
+                for (int32_t i_dk = 0; i_dk < args.ne00; ++i_dk) {
+                    device const float * q_ptr = (device const float *) (q +
+                            i_dk*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const K * k_ptr = (device const K *) (k +
+                            i_dk*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    qk += (*q_ptr) * float(*k_ptr);
+                }
+
+                score = qk*args.scale + mask;
+            }
         }
 
         scores[i_top] = score;
@@ -9588,9 +9592,14 @@ kernel void kernel_dsa_sparse_attn_impl(
                     continue;
                 }
 
+                const float p = scores[i_top]/sum_score;
+                if (p == 0.0f) {
+                    continue;
+                }
+
                 device const V * v_ptr = (device const V *) (v +
                         i_dv*args.nb20 + i_kv*args.nb21 + i_v_head*args.nb22 + i_stream*args.nb23);
-                acc += (scores[i_top]/sum_score) * float(*v_ptr);
+                acc += p * float(*v_ptr);
             }
         }
 
