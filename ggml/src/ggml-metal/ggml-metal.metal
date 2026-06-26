@@ -2835,7 +2835,21 @@ kernel void kernel_lightning_indexer_impl(
     for (int i_head = 0; i_head < args.ne01; ++i_head) {
         float qk = 0.0f;
 
-        for (int i_embd = 0; i_embd < args.ne00; ++i_embd) {
+        int i_embd = 0;
+        for (; i_embd + 7 < args.ne00; i_embd += 8) {
+            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+            device const K     * k_ptr = (device const K     *) (k + i_embd*args.nb10 + i_kv*args.nb12 + i_stream*args.nb13);
+
+            qk += q_ptr[0] * float(k_ptr[0]);
+            qk += q_ptr[1] * float(k_ptr[1]);
+            qk += q_ptr[2] * float(k_ptr[2]);
+            qk += q_ptr[3] * float(k_ptr[3]);
+            qk += q_ptr[4] * float(k_ptr[4]);
+            qk += q_ptr[5] * float(k_ptr[5]);
+            qk += q_ptr[6] * float(k_ptr[6]);
+            qk += q_ptr[7] * float(k_ptr[7]);
+        }
+        for (; i_embd < args.ne00; ++i_embd) {
             device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
             device const K     * k_ptr = (device const K     *) (k + i_embd*args.nb10 + i_kv*args.nb12 + i_stream*args.nb13);
 
