@@ -3970,7 +3970,7 @@ struct test_lightning_indexer : public test_case {
     }
 
     double max_nmse_err() override {
-        return type_k == GGML_TYPE_F16 ? 1e-6 : 1e-7;
+        return ggml_is_quantized(type_k) ? 1e-5 : (type_k == GGML_TYPE_F16 ? 1e-6 : 1e-7);
     }
 };
 
@@ -9732,6 +9732,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F32, 4, 16, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 4, 16, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 8, 32, 4, 65, 2));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q4_0, 4, 32, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q8_0, 4, 32, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q2_K, 4, 256, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q3_K, 4, 256, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q4_K, 4, 256, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q5_K, 4, 256, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q6_K, 4, 256, 2, 33, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F32, 33, 2, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 33, 2, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 65, 4, 2, 8, 2));

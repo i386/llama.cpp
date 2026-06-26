@@ -2866,23 +2866,8 @@ kernel void kernel_lightning_indexer_impl(
 
 typedef decltype(kernel_lightning_indexer_impl<float>) kernel_lightning_indexer_t;
 
-inline float lightning_indexer_q4_0_value(
-        constant ggml_metal_kargs_lightning_indexer & args,
-        device const char * k,
-        int i_embd,
-        int i_kv,
-        int i_stream) {
-    device const block_q4_0 * k_row = (device const block_q4_0 *) (k + i_kv*args.nb12 + i_stream*args.nb13);
-
-    device const block_q4_0 * k_block = k_row + i_embd/32;
-    const int i_q = i_embd & 31;
-    const uchar packed = k_block->qs[i_q & 15];
-    const int q4 = (i_q < 16 ? (packed & 0x0f) : (packed >> 4)) - 8;
-
-    return float(q4) * float(k_block->d);
-}
-
-kernel void kernel_lightning_indexer_q4_0(
+template<typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread float4x4 &)>
+kernel void kernel_lightning_indexer_quant(
         constant ggml_metal_kargs_lightning_indexer & args,
         device const char * q,
         device const char * k,
@@ -2899,26 +2884,23 @@ kernel void kernel_lightning_indexer_q4_0(
 
     float score = 0.0f;
 
+    device const block_q * k_row = (device const block_q *) (k + i_kv*args.nb12 + i_stream*args.nb13);
+
     for (int i_head = 0; i_head < args.ne01; ++i_head) {
         float qk = 0.0f;
 
-        int i_embd = 0;
-        for (; i_embd + 7 < args.ne00; i_embd += 8) {
+        for (int i_embd = 0; i_embd < args.ne00; i_embd += 16) {
             device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
 
-            qk += q_ptr[0] * lightning_indexer_q4_0_value(args, k, i_embd + 0, i_kv, i_stream);
-            qk += q_ptr[1] * lightning_indexer_q4_0_value(args, k, i_embd + 1, i_kv, i_stream);
-            qk += q_ptr[2] * lightning_indexer_q4_0_value(args, k, i_embd + 2, i_kv, i_stream);
-            qk += q_ptr[3] * lightning_indexer_q4_0_value(args, k, i_embd + 3, i_kv, i_stream);
-            qk += q_ptr[4] * lightning_indexer_q4_0_value(args, k, i_embd + 4, i_kv, i_stream);
-            qk += q_ptr[5] * lightning_indexer_q4_0_value(args, k, i_embd + 5, i_kv, i_stream);
-            qk += q_ptr[6] * lightning_indexer_q4_0_value(args, k, i_embd + 6, i_kv, i_stream);
-            qk += q_ptr[7] * lightning_indexer_q4_0_value(args, k, i_embd + 7, i_kv, i_stream);
-        }
-        for (; i_embd < args.ne00; ++i_embd) {
-            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+            float4x4 k_reg;
+            const int i_block = i_embd / (16*nl);
+            const short il = (i_embd / 16) % nl;
+            dequantize_func(k_row + i_block, il, k_reg);
 
-            qk += *q_ptr * lightning_indexer_q4_0_value(args, k, i_embd, i_kv, i_stream);
+            const int n_chunk = min(16, args.ne00 - i_embd);
+            for (int i = 0; i < n_chunk; ++i) {
+                qk += q_ptr[i] * k_reg[i/4][i%4];
+            }
         }
 
         device const float * weight_ptr = (device const float *) (weights + i_head*args.nb20 + i_batch*args.nb21 + i_stream*args.nb23);
@@ -2928,6 +2910,16 @@ kernel void kernel_lightning_indexer_q4_0(
     device float * dst_ptr = (device float *) (dst + i_kv*args.nb0 + i_batch*args.nb1 + i_stream*args.nb3);
     *dst_ptr = score * args.scale_heads;
 }
+
+typedef decltype(kernel_lightning_indexer_quant<block_q4_0, 2, dequantize_q4_0>) kernel_lightning_indexer_quant_t;
+
+template [[host_name("kernel_lightning_indexer_q4_0")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q4_0, 2, dequantize_q4_0>;
+template [[host_name("kernel_lightning_indexer_q8_0")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q8_0, 2, dequantize_q8_0>;
+template [[host_name("kernel_lightning_indexer_q2_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q2_K, 16, dequantize_q2_K>;
+template [[host_name("kernel_lightning_indexer_q3_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q3_K, 16, dequantize_q3_K>;
+template [[host_name("kernel_lightning_indexer_q4_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q4_K, 16, dequantize_q4_K>;
+template [[host_name("kernel_lightning_indexer_q5_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q5_K, 16, dequantize_q5_K>;
+template [[host_name("kernel_lightning_indexer_q6_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q6_K, 16, dequantize_q6_K>;
 
 template [[host_name("kernel_lightning_indexer_f32")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<float>;
 template [[host_name("kernel_lightning_indexer_f16")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<half>;

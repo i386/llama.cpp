@@ -1256,13 +1256,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 const bool k_scalar =
                     (op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16) &&
                     op->src[1]->nb[0] == ggml_type_size(op->src[1]->type);
-                const bool k_q4_0 =
-                    op->src[1]->type == GGML_TYPE_Q4_0 &&
-                    op->src[1]->ne[0] % 32 == 0;
+                const bool k_quant =
+                    (op->src[1]->type == GGML_TYPE_Q4_0 ||
+                     op->src[1]->type == GGML_TYPE_Q8_0 ||
+                     op->src[1]->type == GGML_TYPE_Q2_K ||
+                     op->src[1]->type == GGML_TYPE_Q3_K ||
+                     op->src[1]->type == GGML_TYPE_Q4_K ||
+                     op->src[1]->type == GGML_TYPE_Q5_K ||
+                     op->src[1]->type == GGML_TYPE_Q6_K) &&
+                    op->src[1]->ne[0] % ggml_blck_size(op->src[1]->type) == 0;
                 return op->type == GGML_TYPE_F32 &&
                    op->src[0]->type == GGML_TYPE_F32 &&
                    op->src[2]->type == GGML_TYPE_F32 &&
-                   (k_scalar || k_q4_0) &&
+                   (k_scalar || k_quant) &&
                    op->nb[0] == sizeof(float) &&
                    op->src[0]->nb[0] == sizeof(float) &&
                    op->src[2]->nb[0] == sizeof(float) &&
