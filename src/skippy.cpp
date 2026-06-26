@@ -3379,6 +3379,7 @@ static enum skippy_status skippy_model_open_impl(
         params.n_gpu_layers = config->n_gpu_layers;
         params.use_mmap = config->use_mmap;
         params.use_mmap_prefetch = config->use_mmap_prefetch;
+        params.use_mmap_buffer = config->use_mmap_buffer;
         if (config->disable_repack || config->filter_tensors_on_load) {
             params.use_extra_bufts = false;
         }
@@ -3466,6 +3467,7 @@ static enum skippy_status skippy_model_open_from_parts_impl(
         params.n_gpu_layers = config->n_gpu_layers;
         params.use_mmap = config->use_mmap;
         params.use_mmap_prefetch = config->use_mmap_prefetch;
+        params.use_mmap_buffer = config->use_mmap_buffer;
         if (config->disable_repack || config->filter_tensors_on_load) {
             params.use_extra_bufts = false;
         }

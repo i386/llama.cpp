@@ -319,6 +319,7 @@ extern "C" {
         bool vocab_only;      // only load the vocabulary, no weights
         bool use_mmap;        // use mmap if possible
         bool use_mmap_prefetch; // prefetch mmaped model files during load
+        bool use_mmap_buffer; // use backend buffers backed directly by mmaped model file ranges
         bool use_direct_io;   // use direct io, takes precedence over use_mmap when supported
         bool use_mlock;       // force system to keep model in RAM
         bool check_tensors;   // validate model tensor data

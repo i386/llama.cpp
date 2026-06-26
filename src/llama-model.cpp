@@ -1212,12 +1212,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     const int n_layer_all = hparams.n_layer_all;
     const int n_gpu_layers = this->n_gpu_layers();
 
-    const bool use_mmap_buffer = true;
+    const bool use_mmap_buffer = params.use_mmap_buffer;
 
     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
 
-    LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, mmap_prefetch = %s, direct_io = %s)\n",
-        __func__, ml.use_mmap ? "true" : "false", params.use_mmap_prefetch ? "true" : "false", ml.use_direct_io ? "true" : "false");
+    LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, mmap_prefetch = %s, mmap_buffer = %s, direct_io = %s)\n",
+        __func__, ml.use_mmap ? "true" : "false", params.use_mmap_prefetch ? "true" : "false",
+        params.use_mmap_buffer ? "true" : "false", ml.use_direct_io ? "true" : "false");
 
     // build a list of buffer types for the CPU and GPU devices
     pimpl->cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
@@ -2293,6 +2294,7 @@ llama_model_params llama_model_default_params() {
         /*.vocab_only                  =*/ false,
         /*.use_mmap                    =*/ true,
         /*.use_mmap_prefetch           =*/ true,
+        /*.use_mmap_buffer             =*/ true,
         /*.use_direct_io               =*/ false,
         /*.use_mlock                   =*/ false,
         /*.check_tensors               =*/ false,
