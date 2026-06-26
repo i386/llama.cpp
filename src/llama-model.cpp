@@ -11,6 +11,7 @@
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-kv-cache-dsa.h"
+#include "llama-graph.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
@@ -2041,6 +2042,24 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
         case LLM_ARCH_DEEPSEEK32:
         case LLM_ARCH_GLM_DSA:
             {
+                llama_kv_cache::layer_filter_cb filter = nullptr;
+                const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
+                if (hparams.n_layer_nextn > 0 && params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+                    filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
+                } else if (stage_filter.enabled) {
+                    const uint32_t layer_start = std::min<uint32_t>(
+                            std::max<int32_t>(stage_filter.layer_start, 0),
+                            hparams.n_layer());
+                    const uint32_t layer_end = std::min<uint32_t>(
+                            std::max<int32_t>(stage_filter.layer_end, 0),
+                            hparams.n_layer());
+                    filter = [layer_start, layer_end](uint32_t il) {
+                        return il >= layer_start && il < layer_end;
+                    };
+                } else if (hparams.n_layer_nextn > 0) {
+                    filter = [&](uint32_t il) { return il < hparams.n_layer(); };
+                }
+
                 res = new llama_kv_cache_dsa(
                         *this,
                         params.type_k,
@@ -2053,7 +2072,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         1,
                         hparams.n_swa,
                         hparams.swa_type,
-                        nullptr,
+                        filter,
                         nullptr);
             } break;
         // Models that need standard caching should rely on recurrent/hybrid
