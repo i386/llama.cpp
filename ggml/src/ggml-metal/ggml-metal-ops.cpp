@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <cmath>
 
@@ -23,6 +24,11 @@ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     ggml_metal_buffer_t ctx = (ggml_metal_buffer_t) buffer->context;
 
     return ggml_metal_buffer_get_id(ctx, t);
+}
+
+static bool ggml_metal_lightning_indexer_parallel_requested() {
+    const char * value = getenv("LLAMA_GLM_DSA_PARALLEL_LIGHTNING_INDEXER");
+    return value && atoi(value) != 0;
 }
 
 struct ggml_metal_op {
@@ -4364,7 +4370,33 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
 
-    auto pipeline = ggml_metal_library_get_pipeline_lightning_indexer(lib, op);
+    const bool parallel_requested = ggml_metal_lightning_indexer_parallel_requested();
+    bool parallel = parallel_requested && ne01 <= 1024;
+    auto pipeline = ggml_metal_library_get_pipeline_lightning_indexer(lib, op, parallel);
+    int nth = std::min(parallel ? 1024 : 64, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    if (parallel && ne01 > nth) {
+        parallel = false;
+        pipeline = ggml_metal_library_get_pipeline_lightning_indexer(lib, op, parallel);
+        nth = std::min(64, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    }
+
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        const char * parallel_env = getenv("LLAMA_GLM_DSA_PARALLEL_LIGHTNING_INDEXER");
+        GGML_LOG_INFO(
+            "%s: env=%s requested=%d q_ne=(%lld,%lld,%lld,%lld) k_type=%s selected=%d nth=%d\n",
+            __func__,
+            parallel_env ? parallel_env : "<unset>",
+            parallel_requested,
+            (long long) ne00,
+            (long long) ne01,
+            (long long) ne02,
+            (long long) ne03,
+            ggml_type_name(op->src[1]->type),
+            parallel,
+            nth);
+    }
 
     ggml_metal_kargs_lightning_indexer args = {
         /*.ne00        =*/ ne00,
@@ -4412,8 +4444,7 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[2]), ida++); // weights
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         ida++); // dst
 
-    const int nth = std::min(64, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
-    ggml_metal_encoder_dispatch_threadgroups(enc, (ne0 + nth - 1)/nth, ne1, ne3, nth, 1, 1);
+    ggml_metal_encoder_dispatch_threadgroups(enc, parallel ? ne0 : (ne0 + nth - 1)/nth, ne1, ne3, nth, 1, 1);
 
     return 1;
 }

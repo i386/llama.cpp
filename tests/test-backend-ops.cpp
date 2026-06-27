@@ -9732,8 +9732,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F32, 4, 16, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 4, 16, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 8, 32, 4, 65, 2));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 32, 128, 2, 65, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q4_0, 4, 32, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q8_0, 4, 32, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q8_0, 32, 128, 2, 65, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q2_K, 4, 256, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q3_K, 4, 256, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q4_K, 4, 256, 2, 33, 1));

@@ -2913,6 +2913,140 @@ kernel void kernel_lightning_indexer_quant(
 
 typedef decltype(kernel_lightning_indexer_quant<block_q4_0, 2, dequantize_q4_0>) kernel_lightning_indexer_quant_t;
 
+#define LIGHTNING_INDEXER_PARALLEL_MAX_THREADS 1024
+
+template<typename K>
+kernel void kernel_lightning_indexer_parallel_impl(
+        constant ggml_metal_kargs_lightning_indexer & args,
+        device const char * q,
+        device const char * k,
+        device const char * weights,
+        device       char * dst,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  tiitg [[thread_index_in_threadgroup]],
+        uint3 tptg  [[threads_per_threadgroup]]) {
+    threadgroup float shared_qk[LIGHTNING_INDEXER_PARALLEL_MAX_THREADS];
+    threadgroup float shared_scores[LIGHTNING_INDEXER_PARALLEL_MAX_THREADS];
+
+    const int i_kv     = tgpig.x;
+    const int i_batch  = tgpig.y;
+    const int i_stream = tgpig.z;
+    const int tid      = tiitg;
+    const int n_threads = tptg.x;
+
+    const int lanes_per_head = max(1, n_threads / args.ne01);
+    const int i_head = tid / lanes_per_head;
+    const int i_lane = tid - i_head * lanes_per_head;
+    const bool active = i_kv < args.ne0 && i_batch < args.ne1 && i_stream < args.ne3 && i_head < args.ne01;
+
+    float qk = 0.0f;
+    if (active) {
+        for (int i_embd = i_lane; i_embd < args.ne00; i_embd += lanes_per_head) {
+            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+            device const K     * k_ptr = (device const K     *) (k + i_embd*args.nb10 + i_kv*args.nb12 + i_stream*args.nb13);
+
+            qk += *q_ptr * float(*k_ptr);
+        }
+    }
+
+    shared_qk[tid] = qk;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (active && i_lane == 0) {
+        float head_qk = 0.0f;
+        const int head_start = i_head * lanes_per_head;
+        for (int lane = 0; lane < lanes_per_head; ++lane) {
+            head_qk += shared_qk[head_start + lane];
+        }
+
+        device const float * weight_ptr = (device const float *) (weights + i_head*args.nb20 + i_batch*args.nb21 + i_stream*args.nb23);
+        shared_scores[i_head] = max(head_qk * args.scale_embd, 0.0f) * *weight_ptr;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0 && i_kv < args.ne0 && i_batch < args.ne1 && i_stream < args.ne3) {
+        float score = 0.0f;
+        for (int i = 0; i < args.ne01; ++i) {
+            score += shared_scores[i];
+        }
+
+        device float * dst_ptr = (device float *) (dst + i_kv*args.nb0 + i_batch*args.nb1 + i_stream*args.nb3);
+        *dst_ptr = score * args.scale_heads;
+    }
+}
+
+template<typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread float4x4 &)>
+kernel void kernel_lightning_indexer_parallel_quant(
+        constant ggml_metal_kargs_lightning_indexer & args,
+        device const char * q,
+        device const char * k,
+        device const char * weights,
+        device       char * dst,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  tiitg [[thread_index_in_threadgroup]],
+        uint3 tptg  [[threads_per_threadgroup]]) {
+    threadgroup float shared_qk[LIGHTNING_INDEXER_PARALLEL_MAX_THREADS];
+    threadgroup float shared_scores[LIGHTNING_INDEXER_PARALLEL_MAX_THREADS];
+
+    const int i_kv     = tgpig.x;
+    const int i_batch  = tgpig.y;
+    const int i_stream = tgpig.z;
+    const int tid      = tiitg;
+    const int n_threads = tptg.x;
+
+    const int lanes_per_head = max(1, n_threads / args.ne01);
+    const int i_head = tid / lanes_per_head;
+    const int i_lane = tid - i_head * lanes_per_head;
+    const bool active = i_kv < args.ne0 && i_batch < args.ne1 && i_stream < args.ne3 && i_head < args.ne01;
+
+    float qk = 0.0f;
+    if (active) {
+        device const block_q * k_row = (device const block_q *) (k + i_kv*args.nb12 + i_stream*args.nb13);
+
+        for (int i_embd = i_lane * 16; i_embd < args.ne00; i_embd += lanes_per_head * 16) {
+            device const float * q_ptr = (device const float *) (q + i_embd*args.nb00 + i_head*args.nb01 + i_batch*args.nb02 + i_stream*args.nb03);
+
+            float4x4 k_reg;
+            const int i_block = i_embd / (16*nl);
+            const short il = (i_embd / 16) % nl;
+            dequantize_func(k_row + i_block, il, k_reg);
+
+            const int n_chunk = min(16, args.ne00 - i_embd);
+            for (int i = 0; i < n_chunk; ++i) {
+                qk += q_ptr[i] * k_reg[i/4][i%4];
+            }
+        }
+    }
+
+    shared_qk[tid] = qk;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (active && i_lane == 0) {
+        float head_qk = 0.0f;
+        const int head_start = i_head * lanes_per_head;
+        for (int lane = 0; lane < lanes_per_head; ++lane) {
+            head_qk += shared_qk[head_start + lane];
+        }
+
+        device const float * weight_ptr = (device const float *) (weights + i_head*args.nb20 + i_batch*args.nb21 + i_stream*args.nb23);
+        shared_scores[i_head] = max(head_qk * args.scale_embd, 0.0f) * *weight_ptr;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0 && i_kv < args.ne0 && i_batch < args.ne1 && i_stream < args.ne3) {
+        float score = 0.0f;
+        for (int i = 0; i < args.ne01; ++i) {
+            score += shared_scores[i];
+        }
+
+        device float * dst_ptr = (device float *) (dst + i_kv*args.nb0 + i_batch*args.nb1 + i_stream*args.nb3);
+        *dst_ptr = score * args.scale_heads;
+    }
+}
+
+typedef decltype(kernel_lightning_indexer_parallel_impl<float>) kernel_lightning_indexer_parallel_t;
+typedef decltype(kernel_lightning_indexer_parallel_quant<block_q4_0, 2, dequantize_q4_0>) kernel_lightning_indexer_parallel_quant_t;
+
 template [[host_name("kernel_lightning_indexer_q4_0")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q4_0, 2, dequantize_q4_0>;
 template [[host_name("kernel_lightning_indexer_q8_0")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q8_0, 2, dequantize_q8_0>;
 template [[host_name("kernel_lightning_indexer_q2_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q2_K, 16, dequantize_q2_K>;
@@ -2921,8 +3055,18 @@ template [[host_name("kernel_lightning_indexer_q4_K")]] kernel kernel_lightning_
 template [[host_name("kernel_lightning_indexer_q5_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q5_K, 16, dequantize_q5_K>;
 template [[host_name("kernel_lightning_indexer_q6_K")]] kernel kernel_lightning_indexer_quant_t kernel_lightning_indexer_quant<block_q6_K, 16, dequantize_q6_K>;
 
+template [[host_name("kernel_lightning_indexer_parallel_q4_0")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q4_0, 2, dequantize_q4_0>;
+template [[host_name("kernel_lightning_indexer_parallel_q8_0")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q8_0, 2, dequantize_q8_0>;
+template [[host_name("kernel_lightning_indexer_parallel_q2_K")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q2_K, 16, dequantize_q2_K>;
+template [[host_name("kernel_lightning_indexer_parallel_q3_K")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q3_K, 16, dequantize_q3_K>;
+template [[host_name("kernel_lightning_indexer_parallel_q4_K")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q4_K, 16, dequantize_q4_K>;
+template [[host_name("kernel_lightning_indexer_parallel_q5_K")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q5_K, 16, dequantize_q5_K>;
+template [[host_name("kernel_lightning_indexer_parallel_q6_K")]] kernel kernel_lightning_indexer_parallel_quant_t kernel_lightning_indexer_parallel_quant<block_q6_K, 16, dequantize_q6_K>;
+
 template [[host_name("kernel_lightning_indexer_f32")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<float>;
 template [[host_name("kernel_lightning_indexer_f16")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer_impl<half>;
+template [[host_name("kernel_lightning_indexer_parallel_f32")]] kernel kernel_lightning_indexer_parallel_t kernel_lightning_indexer_parallel_impl<float>;
+template [[host_name("kernel_lightning_indexer_parallel_f16")]] kernel kernel_lightning_indexer_parallel_t kernel_lightning_indexer_parallel_impl<half>;
 
 constant short FC_solve_tri_nsg [[function_constant(FC_SOLVE_TRI + 0)]];
 constant short FC_solve_tri_n   [[function_constant(FC_SOLVE_TRI + 1)]];
