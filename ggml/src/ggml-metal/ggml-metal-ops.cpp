@@ -36,6 +36,24 @@ static bool ggml_metal_glm_dsa_dispatch_log_enabled() {
     return value && atoi(value) != 0;
 }
 
+static int ggml_metal_glm_dsa_sparse_attn_threads_requested() {
+    const char * value = getenv("SKIPPY_GLM_DSA_SPARSE_ATTN_THREADS");
+    if (value == nullptr || value[0] == '\0') {
+        return 256;
+    }
+
+    const int requested = atoi(value);
+    switch (requested) {
+        case 32:
+        case 64:
+        case 128:
+        case 256:
+            return requested;
+        default:
+            return 256;
+    }
+}
+
 static const char * ggml_metal_tensor_name(const ggml_tensor * tensor) {
     return tensor != nullptr && tensor->name[0] != '\0' ? tensor->name : "<unnamed>";
 }
@@ -4632,7 +4650,8 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[4]), ida++); // top_k
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         ida++); // dst
 
-    const int nth = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    const int nth_requested = ggml_metal_glm_dsa_sparse_attn_threads_requested();
+    const int nth = std::min(nth_requested, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
     const int grid_x = ne1;
     const int grid_y = ne2;
     const int grid_z = ne3;
