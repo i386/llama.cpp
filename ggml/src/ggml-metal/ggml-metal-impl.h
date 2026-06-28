@@ -1242,6 +1242,20 @@ typedef struct {
 } ggml_metal_kargs_topk_moe_route;
 
 typedef struct {
+    int32_t  n_embd;
+    int32_t  n_tokens;
+    int32_t  n_expert_used;
+    int32_t  _pad0;
+    uint64_t experts_nb0;
+    uint64_t experts_nb1;
+    uint64_t experts_nb2;
+    uint64_t weights_nb1;
+    uint64_t weights_nb2;
+    uint64_t dst_nb0;
+    uint64_t dst_nb1;
+} ggml_metal_kargs_moe_weighted_sum;
+
+typedef struct {
     int64_t  ne0;
     float    start;
     float    step;

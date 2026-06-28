@@ -56,6 +56,10 @@ static bool skippy_glm_dsa_direct_sparse_decision_log_enabled() {
     return skippy_env_enabled("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS");
 }
 
+static bool skippy_glm_dsa_moe_weighted_sum_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_MOE_WEIGHTED_SUM");
+}
+
 static void skippy_glm_dsa_log_direct_sparse_decision(
         int     layer,
         int64_t ubatch_tokens,
@@ -2035,6 +2039,27 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
         experts = ggml_mul(ctx0, experts, s);
         cb(experts, "ffn_moe_down_scaled", il);
+    }
+
+    const bool use_moe_weighted_sum =
+        !weight_before_ffn &&
+        skippy_glm_dsa_moe_weighted_sum_enabled() &&
+        n_expert_used == hparams.n_expert_used &&
+        n_expert_used > 1 &&
+        weights->type == GGML_TYPE_F32 &&
+        experts->type == GGML_TYPE_F32 &&
+        weights->ne[0] == 1 &&
+        weights->ne[1] == n_expert_used &&
+        weights->ne[2] == n_tokens &&
+        experts->ne[0] == n_embd &&
+        experts->ne[1] == n_expert_used &&
+        experts->ne[2] == n_tokens;
+
+    if (use_moe_weighted_sum) {
+        ggml_tensor * moe_out = ggml_moe_weighted_sum(ctx0, experts, weights);
+        ggml_build_forward_expand(gf, moe_out);
+        cb(moe_out, "ffn_moe_out", il);
+        return moe_out;
     }
 
     if (!weight_before_ffn) {

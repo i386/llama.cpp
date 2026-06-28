@@ -5874,6 +5874,33 @@ kernel void kernel_topk_moe_route_f32_i32(
     }
 }
 
+kernel void kernel_moe_weighted_sum_f32(
+        constant ggml_metal_kargs_moe_weighted_sum & args,
+        device const char * experts,
+        device const char * weights,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort3 tptg[[threads_per_threadgroup]]) {
+    const int32_t i_embd = int32_t(tgpig.x*tptg.x + tiitg);
+    const int32_t token  = int32_t(tgpig.y);
+
+    if (i_embd >= args.n_embd || token >= args.n_tokens) {
+        return;
+    }
+
+    float acc = 0.0f;
+    for (int32_t expert = 0; expert < args.n_expert_used; ++expert) {
+        const float value = ((device const float *) (experts +
+                i_embd*args.experts_nb0 + expert*args.experts_nb1 + token*args.experts_nb2))[0];
+        const float weight = ((device const float *) (weights +
+                expert*args.weights_nb1 + token*args.weights_nb2))[0];
+        acc += value*weight;
+    }
+
+    ((device float *) (dst + i_embd*args.dst_nb0 + token*args.dst_nb1))[0] = acc;
+}
+
 typedef void (argsort_merge_t)(
         constant   ggml_metal_kargs_argsort_merge & args,
         device const char    * src0,

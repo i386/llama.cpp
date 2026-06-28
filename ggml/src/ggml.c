@@ -1067,6 +1067,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "LIGHTNING_INDEXER",
     "DSA_SPARSE_MASK",
     "DSA_SPARSE_ATTN",
+    "MOE_WEIGHTED_SUM",
 
     "UNARY",
 
@@ -1084,7 +1085,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1181,6 +1182,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "lightning_indexer(q, k, weights, scale_embd, scale_heads)",
     "dsa_sparse_mask(kq_mask, top_k)",
     "dsa_sparse_attn(q, k, v, kq_mask, top_k)",
+    "moe_weighted_sum(experts, weights)",
 
     "unary(x)",
 
@@ -1198,7 +1200,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6380,6 +6382,31 @@ struct ggml_tensor * ggml_dsa_sparse_attn(
     result->src[4] = top_k;
 
     ggml_set_op_params_f32(result, 0, scale);
+
+    return result;
+}
+
+// ggml_moe_weighted_sum
+
+struct ggml_tensor * ggml_moe_weighted_sum(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * experts,
+        struct ggml_tensor  * weights) {
+
+    GGML_ASSERT(experts->type == GGML_TYPE_F32);
+    GGML_ASSERT(weights->type == GGML_TYPE_F32);
+    GGML_ASSERT(weights->ne[0] == 1);
+    GGML_ASSERT(experts->ne[1] == weights->ne[1]);
+    GGML_ASSERT(experts->ne[2] == weights->ne[2]);
+    GGML_ASSERT(experts->ne[3] == 1);
+    GGML_ASSERT(weights->ne[3] == 1);
+
+    int64_t ne[2] = { experts->ne[0], experts->ne[2] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 2, ne);
+
+    result->op     = GGML_OP_MOE_WEIGHTED_SUM;
+    result->src[0] = experts;
+    result->src[1] = weights;
 
     return result;
 }

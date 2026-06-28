@@ -709,6 +709,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_dsa_sparse_attn(ctx, idx);
             } break;
+        case GGML_OP_MOE_WEIGHTED_SUM:
+            {
+                n_fuse = ggml_metal_op_moe_weighted_sum(ctx, idx);
+            } break;
         case GGML_OP_SOLVE_TRI:
             {
                 n_fuse = ggml_metal_op_solve_tri(ctx, idx);
@@ -5081,6 +5085,64 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
             head_group);
     }
     ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, nth, head_group, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_moe_weighted_sum(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
+    GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb1, op->src[1], nb);
+    GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
+    GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
+
+    ggml_metal_kargs_moe_weighted_sum args = {
+        /*.n_embd        =*/ ne00,
+        /*.n_tokens      =*/ ne02,
+        /*.n_expert_used =*/ ne01,
+        /*._pad0         =*/ 0,
+        /*.experts_nb0   =*/ nb00,
+        /*.experts_nb1   =*/ nb01,
+        /*.experts_nb2   =*/ nb02,
+        /*.weights_nb1   =*/ nb11,
+        /*.weights_nb2   =*/ nb12,
+        /*.dst_nb0       =*/ nb0,
+        /*.dst_nb1       =*/ nb1,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_moe_weighted_sum(lib);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),                     0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]),    1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]),    2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),            3);
+
+    const int nth = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    const int grid_x = (ne00 + nth - 1)/nth;
+    const int grid_y = ne02;
+
+    if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+        GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=moe_weighted_sum kernel=f32 tensor=%s experts=%s weights=%s embd=%lld tokens=%lld used_experts=%lld grid_x=%d grid_y=%d grid_z=1 threads_x=%d\n",
+            ggml_metal_tensor_name(op),
+            ggml_metal_tensor_name(op->src[0]),
+            ggml_metal_tensor_name(op->src[1]),
+            (long long) ne00,
+            (long long) ne02,
+            (long long) ne01,
+            grid_x,
+            grid_y,
+            nth);
+    }
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, 1, nth, 1, 1);
 
     return 1;
 }

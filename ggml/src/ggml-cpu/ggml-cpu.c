@@ -2063,6 +2063,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_dsa_sparse_attn(params, tensor);
             } break;
+        case GGML_OP_MOE_WEIGHTED_SUM:
+            {
+                ggml_compute_forward_moe_weighted_sum(params, tensor);
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);

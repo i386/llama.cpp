@@ -571,6 +571,7 @@ extern "C" {
         GGML_OP_LIGHTNING_INDEXER,
         GGML_OP_DSA_SPARSE_MASK,
         GGML_OP_DSA_SPARSE_ATTN,
+        GGML_OP_MOE_WEIGHTED_SUM,
 
         GGML_OP_UNARY,
 
@@ -2597,6 +2598,11 @@ extern "C" {
             struct ggml_tensor  * kq_mask_rows,
             struct ggml_tensor  * top_k,
             float                 scale);
+
+    GGML_API struct ggml_tensor * ggml_moe_weighted_sum(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * experts,
+            struct ggml_tensor  * weights);
 
     // custom operators
 

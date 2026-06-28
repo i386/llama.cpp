@@ -11085,6 +11085,52 @@ void ggml_compute_forward_dsa_sparse_attn(
     }
 }
 
+// ggml_compute_forward_moe_weighted_sum
+
+void ggml_compute_forward_moe_weighted_sum(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * experts = dst->src[0]; // [n_embd, n_expert_used, n_tokens, 1]
+    const ggml_tensor * weights = dst->src[1]; // [1, n_expert_used, n_tokens, 1]
+
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(experts->type == GGML_TYPE_F32);
+    GGML_ASSERT(weights->type == GGML_TYPE_F32);
+    GGML_ASSERT(weights->ne[0] == 1);
+    GGML_ASSERT(dst->ne[0] == experts->ne[0]);
+    GGML_ASSERT(dst->ne[1] == experts->ne[2]);
+    GGML_ASSERT(experts->ne[1] == weights->ne[1]);
+    GGML_ASSERT(experts->ne[2] == weights->ne[2]);
+
+    const int64_t n_embd        = experts->ne[0];
+    const int64_t n_expert_used = experts->ne[1];
+    const int64_t n_tokens      = experts->ne[2];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t total = n_embd * n_tokens;
+    const int64_t dr    = (total + nth - 1) / nth;
+    const int64_t i0    = dr * ith;
+    const int64_t i1    = MIN(i0 + dr, total);
+
+    for (int64_t i = i0; i < i1; ++i) {
+        const int64_t i_embd = i % n_embd;
+        const int64_t token  = i / n_embd;
+
+        float acc = 0.0f;
+        for (int64_t expert = 0; expert < n_expert_used; ++expert) {
+            const float value = *(const float *) ((const char *) experts->data +
+                    i_embd * experts->nb[0] + expert * experts->nb[1] + token * experts->nb[2]);
+            const float weight = *(const float *) ((const char *) weights->data +
+                    expert * weights->nb[1] + token * weights->nb[2]);
+            acc += value * weight;
+        }
+
+        *(float *) ((char *) dst->data + i_embd * dst->nb[0] + token * dst->nb[1]) = acc;
+    }
+}
+
 // ggml_compute_forward_rwkv_wkv7
 
 static void ggml_compute_forward_rwkv_wkv7_f32(

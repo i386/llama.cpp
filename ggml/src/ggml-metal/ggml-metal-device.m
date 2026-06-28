@@ -1318,6 +1318,20 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->ne[1] == op->src[0]->ne[1] &&
                    op->ne[2] == op->src[0]->ne[2] &&
                    op->ne[3] == op->src[0]->ne[3];
+        case GGML_OP_MOE_WEIGHTED_SUM:
+            return op->type == GGML_TYPE_F32 &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->nb[0] == sizeof(float) &&
+                   op->src[0]->nb[0] == sizeof(float) &&
+                   op->src[1]->nb[0] == sizeof(float) &&
+                   op->src[1]->ne[0] == 1 &&
+                   op->src[0]->ne[1] == op->src[1]->ne[1] &&
+                   op->src[0]->ne[2] == op->src[1]->ne[2] &&
+                   op->src[0]->ne[3] == 1 &&
+                   op->src[1]->ne[3] == 1 &&
+                   op->ne[0] == op->src[0]->ne[0] &&
+                   op->ne[1] == op->src[0]->ne[2];
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
