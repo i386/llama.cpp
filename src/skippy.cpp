@@ -71,11 +71,22 @@ struct skippy_glm_dsa_op_stat {
 
 static constexpr size_t SKIPPY_GLM_DSA_TIMING_GROUP_LIMIT = 96;
 static constexpr size_t SKIPPY_GLM_DSA_TIMING_GROUP_NAME_SIZE = 32;
+static constexpr size_t SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT = 24;
+static constexpr size_t SKIPPY_GLM_DSA_HOT_TENSOR_NAME_SIZE = 64;
 
 struct skippy_glm_dsa_op_group {
     bool used = false;
     char name[SKIPPY_GLM_DSA_TIMING_GROUP_NAME_SIZE] = {};
     skippy_glm_dsa_op_stat stats[SKIPPY_GLM_DSA_OP_COUNT] = {};
+};
+
+struct skippy_glm_dsa_hot_tensor {
+    bool used = false;
+    skippy_glm_dsa_op_kind kind = SKIPPY_GLM_DSA_OP_UNKNOWN;
+    enum ggml_op op = GGML_OP_NONE;
+    int64_t elapsed_us = 0;
+    int64_t ne[4] = {};
+    char name[SKIPPY_GLM_DSA_HOT_TENSOR_NAME_SIZE] = {};
 };
 
 struct skippy_glm_dsa_op_timing {
@@ -94,6 +105,7 @@ struct skippy_glm_dsa_op_timing {
     std::string trace_filter;
     skippy_glm_dsa_op_stat stats[SKIPPY_GLM_DSA_OP_COUNT] = {};
     skippy_glm_dsa_op_group groups[SKIPPY_GLM_DSA_TIMING_GROUP_LIMIT] = {};
+    skippy_glm_dsa_hot_tensor hot_tensors[SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT] = {};
 };
 
 struct skippy_model {
@@ -1758,6 +1770,41 @@ static void skippy_glm_dsa_record_group_timing(
     group->stats[kind].elapsed_us += elapsed_us;
 }
 
+static void skippy_glm_dsa_record_hot_tensor(
+        skippy_glm_dsa_op_timing & timing,
+        skippy_glm_dsa_op_kind kind,
+        const ggml_tensor * tensor,
+        int64_t elapsed_us) {
+    if (tensor == nullptr || elapsed_us <= 0) {
+        return;
+    }
+
+    size_t slot = SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT;
+    for (size_t i = 0; i < SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT; ++i) {
+        if (!timing.hot_tensors[i].used || elapsed_us > timing.hot_tensors[i].elapsed_us) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT) {
+        return;
+    }
+
+    for (size_t i = SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT - 1; i > slot; --i) {
+        timing.hot_tensors[i] = timing.hot_tensors[i - 1];
+    }
+
+    skippy_glm_dsa_hot_tensor & record = timing.hot_tensors[slot];
+    record.used = true;
+    record.kind = kind;
+    record.op = tensor->op;
+    record.elapsed_us = elapsed_us;
+    for (int i = 0; i < 4; ++i) {
+        record.ne[i] = tensor->ne[i];
+    }
+    std::snprintf(record.name, sizeof(record.name), "%s", tensor->name);
+}
+
 static bool skippy_glm_dsa_tensor_has_buffer(const ggml_tensor * tensor) {
     return tensor != nullptr &&
            tensor->data != nullptr &&
@@ -1983,6 +2030,7 @@ static bool skippy_glm_dsa_op_timing_cb(ggml_tensor * tensor, bool ask, void * u
     timing.stats[kind].nodes += 1;
     timing.stats[kind].elapsed_us += elapsed_us;
     skippy_glm_dsa_record_group_timing(timing, kind, tensor->name, elapsed_us);
+    skippy_glm_dsa_record_hot_tensor(timing, kind, tensor, elapsed_us);
     skippy_glm_dsa_log_direct_sparse_decision_for_tensor(timing, tensor, kind);
     skippy_glm_dsa_trace_tensor(timing, kind, tensor);
     timing.pending_kind = SKIPPY_GLM_DSA_OP_UNKNOWN;
@@ -2088,6 +2136,29 @@ static void skippy_glm_dsa_print_op_group(
     LLAMA_LOG_INFO("%s\n", line.c_str());
 }
 
+static void skippy_glm_dsa_print_hot_tensors(const skippy_glm_dsa_op_timing & timing) {
+    for (size_t i = 0; i < SKIPPY_GLM_DSA_HOT_TENSOR_LIMIT; ++i) {
+        const skippy_glm_dsa_hot_tensor & record = timing.hot_tensors[i];
+        if (!record.used) {
+            return;
+        }
+
+        LLAMA_LOG_INFO(
+                "skippy: glm_dsa_hot_tensor stage=%d tokens=%zu rank=%zu op=%s kind=%s elapsed_us=%lld name=%s ne0=%lld ne1=%lld ne2=%lld ne3=%lld\n",
+                timing.stage_index,
+                timing.token_count,
+                i + 1,
+                ggml_op_name(record.op),
+                skippy_glm_dsa_op_name(record.kind),
+                static_cast<long long>(record.elapsed_us),
+                record.name[0] == '\0' ? "<unnamed>" : record.name,
+                static_cast<long long>(record.ne[0]),
+                static_cast<long long>(record.ne[1]),
+                static_cast<long long>(record.ne[2]),
+                static_cast<long long>(record.ne[3]));
+    }
+}
+
 static void skippy_glm_dsa_op_timing_begin(skippy_session * session, size_t token_count) {
     if (session == nullptr || session->stage_model == nullptr || !session->stage_model->glm_dsa_timing.enabled) {
         return;
@@ -2166,6 +2237,7 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
             skippy_glm_dsa_print_op_group(timing, timing.groups[i]);
         }
     }
+    skippy_glm_dsa_print_hot_tensors(timing);
 }
 
 static void skippy_mtp_clear_session_state(skippy_session * session) {
