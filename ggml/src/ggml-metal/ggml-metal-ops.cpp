@@ -5116,7 +5116,16 @@ int ggml_metal_op_moe_weighted_sum(ggml_metal_op_t ctx, int idx) {
         /*.dst_nb1       =*/ nb1,
     };
 
-    auto pipeline = ggml_metal_library_get_pipeline_moe_weighted_sum(lib);
+    const bool use_x4 =
+        ne00 % 4 == 0 &&
+        nb00 == sizeof(float) &&
+        nb0 == sizeof(float) &&
+        nb01 % (4*sizeof(float)) == 0 &&
+        nb02 % (4*sizeof(float)) == 0 &&
+        nb1  % (4*sizeof(float)) == 0;
+    auto pipeline = use_x4 ?
+        ggml_metal_library_get_pipeline_moe_weighted_sum_x4(lib) :
+        ggml_metal_library_get_pipeline_moe_weighted_sum(lib);
 
     ggml_metal_encoder_set_pipeline(enc, pipeline);
     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),                     0);
@@ -5125,12 +5134,14 @@ int ggml_metal_op_moe_weighted_sum(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),            3);
 
     const int nth = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
-    const int grid_x = (ne00 + nth - 1)/nth;
+    const int ncols = use_x4 ? ne00/4 : ne00;
+    const int grid_x = (ncols + nth - 1)/nth;
     const int grid_y = ne02;
 
     if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
         GGML_LOG_INFO(
-            "skippy: glm_dsa_metal_dispatch op=moe_weighted_sum kernel=f32 tensor=%s experts=%s weights=%s embd=%lld tokens=%lld used_experts=%lld grid_x=%d grid_y=%d grid_z=1 threads_x=%d\n",
+            "skippy: glm_dsa_metal_dispatch op=moe_weighted_sum kernel=%s tensor=%s experts=%s weights=%s embd=%lld tokens=%lld used_experts=%lld grid_x=%d grid_y=%d grid_z=1 threads_x=%d\n",
+            use_x4 ? "f32x4" : "f32",
             ggml_metal_tensor_name(op),
             ggml_metal_tensor_name(op->src[0]),
             ggml_metal_tensor_name(op->src[1]),

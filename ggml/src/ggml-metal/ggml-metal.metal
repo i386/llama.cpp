@@ -5901,6 +5901,34 @@ kernel void kernel_moe_weighted_sum_f32(
     ((device float *) (dst + i_embd*args.dst_nb0 + token*args.dst_nb1))[0] = acc;
 }
 
+kernel void kernel_moe_weighted_sum_f32x4(
+        constant ggml_metal_kargs_moe_weighted_sum & args,
+        device const char * experts,
+        device const char * weights,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort3 tptg[[threads_per_threadgroup]]) {
+    const int32_t vec   = int32_t(tgpig.x*tptg.x + tiitg);
+    const int32_t i_embd = 4*vec;
+    const int32_t token = int32_t(tgpig.y);
+
+    if (i_embd >= args.n_embd || token >= args.n_tokens) {
+        return;
+    }
+
+    float4 acc = float4(0.0f);
+    for (int32_t expert = 0; expert < args.n_expert_used; ++expert) {
+        const float4 value = ((device const float4 *) (experts +
+                i_embd*args.experts_nb0 + expert*args.experts_nb1 + token*args.experts_nb2))[0];
+        const float weight = ((device const float *) (weights +
+                expert*args.weights_nb1 + token*args.weights_nb2))[0];
+        acc += value*weight;
+    }
+
+    ((device float4 *) (dst + i_embd*args.dst_nb0 + token*args.dst_nb1))[0] = acc;
+}
+
 typedef void (argsort_merge_t)(
         constant   ggml_metal_kargs_argsort_merge & args,
         device const char    * src0,
