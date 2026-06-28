@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1164,6 +1165,56 @@ static bool skippy_glm_dsa_layer_has_indexer(const llama_layer & layer) {
     return has_any == has_all && has_all;
 }
 
+static int skippy_glm_dsa_indexshare_freq() {
+    const char * value = getenv("LLAMA_GLM_DSA_INDEXSHARE_FREQ");
+    if (value == nullptr) {
+        return 1;
+    }
+
+    const int freq = atoi(value);
+    return freq > 0 ? freq : 1;
+}
+
+static bool skippy_glm_dsa_indexshare_pattern_layer_is_full(const char * pattern, int layer, bool * matched) {
+    *matched = false;
+    if (pattern == nullptr || pattern[0] == '\0') {
+        return false;
+    }
+
+    int layer_index = 0;
+    for (const char * p = pattern; *p != '\0'; ++p) {
+        const char value = static_cast<char>(std::toupper(static_cast<unsigned char>(*p)));
+        if (value != 'F' && value != 'S') {
+            continue;
+        }
+        if (layer_index == layer) {
+            *matched = true;
+            return value == 'F';
+        }
+        ++layer_index;
+    }
+
+    return false;
+}
+
+static bool skippy_glm_dsa_layer_uses_indexer(int32_t layer_index, const llama_layer & layer) {
+    if (!skippy_glm_dsa_layer_has_indexer(layer)) {
+        return false;
+    }
+
+    bool pattern_matched = false;
+    const bool pattern_full = skippy_glm_dsa_indexshare_pattern_layer_is_full(
+            getenv("LLAMA_GLM_DSA_INDEXSHARE_PATTERN"),
+            layer_index,
+            &pattern_matched);
+    if (pattern_matched) {
+        return pattern_full;
+    }
+
+    const int freq = skippy_glm_dsa_indexshare_freq();
+    return freq <= 1 || (layer_index % freq) == 0;
+}
+
 static bool skippy_glm_dsa_layer_starts_consumer_group(const skippy_session * session, int32_t layer_start) {
     if (!skippy_is_glm_dsa_activation_model(session)) {
         return false;
@@ -1173,7 +1224,7 @@ static bool skippy_glm_dsa_layer_starts_consumer_group(const skippy_session * se
     return config.filter_tensors_on_load &&
            layer_start > 0 &&
            layer_start < static_cast<int32_t>(model->hparams.n_layer()) &&
-           !skippy_glm_dsa_layer_has_indexer(model->layers[layer_start]);
+           !skippy_glm_dsa_layer_uses_indexer(layer_start, model->layers[layer_start]);
 }
 
 static bool skippy_glm_dsa_stage_starts_in_consumer_group(const skippy_session * session) {

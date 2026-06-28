@@ -2,6 +2,7 @@
 
 #include "llama-kv-cache-dsa.h"
 
+#include <cctype>
 #include <cstdlib>
 
 static bool llama_glm_dsa_disable_lightning_indexer() {
@@ -29,6 +30,56 @@ static bool llama_glm_dsa_layer_has_indexer(const llama_layer & layer) {
     }
 
     return has_all;
+}
+
+static int llama_glm_dsa_indexshare_freq() {
+    const char * value = getenv("LLAMA_GLM_DSA_INDEXSHARE_FREQ");
+    if (value == nullptr) {
+        return 1;
+    }
+
+    const int freq = atoi(value);
+    return freq > 0 ? freq : 1;
+}
+
+static bool llama_glm_dsa_indexshare_pattern_layer_is_full(const char * pattern, int il, bool * matched) {
+    *matched = false;
+    if (pattern == nullptr || pattern[0] == '\0') {
+        return false;
+    }
+
+    int layer_index = 0;
+    for (const char * p = pattern; *p != '\0'; ++p) {
+        const char value = static_cast<char>(std::toupper(static_cast<unsigned char>(*p)));
+        if (value != 'F' && value != 'S') {
+            continue;
+        }
+        if (layer_index == il) {
+            *matched = true;
+            return value == 'F';
+        }
+        ++layer_index;
+    }
+
+    return false;
+}
+
+static bool llama_glm_dsa_layer_uses_indexer(int il, const llama_layer & layer) {
+    if (!llama_glm_dsa_layer_has_indexer(layer)) {
+        return false;
+    }
+
+    bool pattern_matched = false;
+    const bool pattern_full = llama_glm_dsa_indexshare_pattern_layer_is_full(
+            getenv("LLAMA_GLM_DSA_INDEXSHARE_PATTERN"),
+            il,
+            &pattern_matched);
+    if (pattern_matched) {
+        return pattern_full;
+    }
+
+    const int freq = llama_glm_dsa_indexshare_freq();
+    return freq <= 1 || (il % freq) == 0;
 }
 
 void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
@@ -227,7 +278,7 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
     ggml_tensor * last_top_k = nullptr;
 
-    if (stage_filtered && il_start > 0 && il_start < effective_n_layers && !llama_glm_dsa_layer_has_indexer(model.layers[il_start])) {
+    if (stage_filtered && il_start > 0 && il_start < effective_n_layers && !llama_glm_dsa_layer_uses_indexer(il_start, model.layers[il_start])) {
         const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
         GGML_ASSERT(n_stream > 0);
         GGML_ASSERT(ubatch.n_tokens % n_stream == 0);
@@ -257,7 +308,7 @@ llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_par
 
             ggml_tensor * top_k = last_top_k;
 
-            if (llama_glm_dsa_layer_has_indexer(model.layers[il])) {
+            if (llama_glm_dsa_layer_uses_indexer(il, model.layers[il])) {
                 ggml_tensor * indexer_q = ggml_mul_mat(ctx0, model.layers[il].indexer_attn_q_b, qr);
                 cb(indexer_q, "indexer_q", il);
 
