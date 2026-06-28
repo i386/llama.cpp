@@ -3,6 +3,8 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 // represents a memory range (i.e. an interval from a starting address p0 to an ending address p1 in a given buffer pb)
@@ -206,6 +208,131 @@ struct node_info {
     }
 };
 
+static bool ggml_metal_topk_moe_route_fusion_enabled() {
+    const char * value = getenv("SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION");
+    return value && atoi(value) != 0;
+}
+
+static bool ggml_metal_dispatch_log_enabled() {
+    const char * value = getenv("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH");
+    return value && atoi(value) != 0;
+}
+
+static void ggml_metal_log_topk_moe_route_candidate(const ggml_cgraph * gf, int i, const char * reason) {
+    if (!ggml_metal_dispatch_log_enabled() || i >= gf->n_nodes) {
+        return;
+    }
+
+    const ggml_tensor * node = gf->nodes[i];
+    if (node->name[0] == '\0' || std::strstr(node->name, "ffn_moe_probs") == nullptr) {
+        return;
+    }
+
+    char ops[512] = {};
+    size_t offset = 0;
+    for (int j = i; j < gf->n_nodes && j < i + 14 && offset < sizeof(ops); ++j) {
+        const ggml_tensor * t = gf->nodes[j];
+        const int written = snprintf(
+                ops + offset,
+                sizeof(ops) - offset,
+                "%s%s/%s",
+                j == i ? "" : ",",
+                ggml_op_name(t->op),
+                t->name[0] == '\0' ? "<unnamed>" : t->name);
+        if (written < 0) {
+            break;
+        }
+        offset += (size_t) written;
+    }
+
+    GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=topk_moe_route_pack tensor=%s candidate=%s reason=%s grid_x=1 grid_y=1 grid_z=1 threads_x=1\n",
+            node->name,
+            ops,
+            reason);
+}
+
+static int ggml_metal_topk_moe_route_pack_len(const ggml_cgraph * gf, int i) {
+    if (!ggml_metal_topk_moe_route_fusion_enabled() || i + 11 > gf->n_nodes) {
+        return 1;
+    }
+
+    ggml_tensor * sigmoid = gf->nodes[i];
+    if (sigmoid->op != GGML_OP_UNARY || ggml_get_unary_op(sigmoid) != GGML_UNARY_OP_SIGMOID) {
+        return 1;
+    }
+
+    ggml_tensor * reshape_probs = gf->nodes[i + 1];
+    ggml_tensor * biased_probs  = gf->nodes[i + 2];
+    ggml_tensor * argsort       = gf->nodes[i + 3];
+    ggml_tensor * ids           = gf->nodes[i + 4];
+    ggml_tensor * get_rows      = gf->nodes[i + 5];
+    ggml_tensor * weights_2d    = gf->nodes[i + 6];
+    ggml_tensor * weights_sum   = gf->nodes[i + 7];
+    ggml_tensor * clamp         = gf->nodes[i + 8];
+    ggml_tensor * div           = gf->nodes[i + 9];
+    ggml_tensor * weights_3d    = gf->nodes[i + 10];
+
+    if (reshape_probs->op != GGML_OP_RESHAPE || reshape_probs->src[0] != sigmoid ||
+            biased_probs->op != GGML_OP_ADD || biased_probs->src[0] != sigmoid ||
+            argsort->op != GGML_OP_ARGSORT || argsort->src[0] != biased_probs ||
+            ids->op != GGML_OP_VIEW || ids->src[0] != argsort ||
+            get_rows->op != GGML_OP_GET_ROWS || get_rows->src[0] != reshape_probs || get_rows->src[1] != ids ||
+            weights_2d->op != GGML_OP_RESHAPE || weights_2d->src[0] != get_rows ||
+            weights_sum->op != GGML_OP_SUM_ROWS || weights_sum->src[0] != weights_2d ||
+            clamp->op != GGML_OP_CLAMP || clamp->src[0] != weights_sum ||
+            div->op != GGML_OP_DIV || div->src[0] != weights_2d || div->src[1] != clamp ||
+            weights_3d->op != GGML_OP_RESHAPE || weights_3d->src[0] != div ||
+            ids->ne[0] <= 0 || ids->ne[0] > 16 || sigmoid->ne[0] > 1024) {
+        ggml_metal_log_topk_moe_route_candidate(gf, i, "shape_or_sequence");
+        return 1;
+    }
+
+    int n_fuse = 11;
+    if (i + 11 < gf->n_nodes) {
+        ggml_tensor * scale = gf->nodes[i + 11];
+        if (scale->op == GGML_OP_SCALE && scale->src[0] == weights_3d) {
+            n_fuse = 12;
+        }
+    }
+
+    const ggml_op ops_with_scale[] = {
+        GGML_OP_UNARY,
+        GGML_OP_RESHAPE,
+        GGML_OP_ADD,
+        GGML_OP_ARGSORT,
+        GGML_OP_VIEW,
+        GGML_OP_GET_ROWS,
+        GGML_OP_RESHAPE,
+        GGML_OP_SUM_ROWS,
+        GGML_OP_CLAMP,
+        GGML_OP_DIV,
+        GGML_OP_RESHAPE,
+        GGML_OP_SCALE,
+    };
+    const ggml_op ops_without_scale[] = {
+        GGML_OP_UNARY,
+        GGML_OP_RESHAPE,
+        GGML_OP_ADD,
+        GGML_OP_ARGSORT,
+        GGML_OP_VIEW,
+        GGML_OP_GET_ROWS,
+        GGML_OP_RESHAPE,
+        GGML_OP_SUM_ROWS,
+        GGML_OP_CLAMP,
+        GGML_OP_DIV,
+        GGML_OP_RESHAPE,
+    };
+    const int outputs[] = { i + 4, i + n_fuse - 1 };
+    if (!ggml_can_fuse_subgraph(gf, i, n_fuse, n_fuse == 12 ? ops_with_scale : ops_without_scale, outputs, 2)) {
+        ggml_metal_log_topk_moe_route_candidate(gf, i, "can_fuse");
+        return 1;
+    }
+
+    ggml_metal_log_topk_moe_route_candidate(gf, i, "packed");
+    return n_fuse;
+}
+
 static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node_info> & nodes) {
     // helper to add node src and dst ranges
     const auto & h_add = [](ggml_mem_ranges_t mrs, const node_info & node) {
@@ -391,14 +518,17 @@ void ggml_graph_optimize(ggml_cgraph * gf) {
             /*.fused =*/ {},
         };
 
+        int f = ggml_metal_topk_moe_route_pack_len(gf, i);
+
         // fuse only ops that start with these operations
         // can be expanded when needed
-        if (node.op() == GGML_OP_ADD ||
+        if (f == 1 && (
+            node.op() == GGML_OP_ADD ||
             node.op() == GGML_OP_NORM ||
-            node.op() == GGML_OP_RMS_NORM) {
+            node.op() == GGML_OP_RMS_NORM)) {
             ops[0] = node.op();
 
-            int f = i + 1;
+            f = i + 1;
             while (f < n && f < i + MAX_FUSE) {
                 // conservatively allow fusing only these ops
                 // can be expanded when needed
@@ -418,14 +548,14 @@ void ggml_graph_optimize(ggml_cgraph * gf) {
                     break;
                 }
             }
+        }
 
-            // add the fused tensors into the node info so we can unfuse them later
-            for (int k = 1; k < f; k++) {
-                ++i;
+        // add the fused tensors into the node info so we can unfuse them later
+        for (int k = 1; k < f; k++) {
+            ++i;
 
-                // the .dst() becomes the last fused tensor
-                node.add_fused(gf->nodes[i]);
-            }
+            // the .dst() becomes the last fused tensor
+            node.add_fused(gf->nodes[i]);
         }
 
         nodes.push_back(std::move(node));

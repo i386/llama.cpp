@@ -441,8 +441,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
         return GGML_STATUS_FAILED;
     }
 
+    const bool topk_moe_route_fusion = getenv("SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION") != nil &&
+        atoi(getenv("SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION")) != 0;
+
     // number of nodes encoded by the main thread (empirically determined)
-    const int n_main = MAX(64, 0.1*gf->n_nodes);
+    const int n_main = topk_moe_route_fusion ? gf->n_nodes : MAX(64, 0.1*gf->n_nodes);
 
     // number of threads in addition to the main thread
     const int n_cb = ctx->n_cb;

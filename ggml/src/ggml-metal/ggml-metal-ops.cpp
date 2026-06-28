@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <limits>
 #include <cmath>
+#include <cstring>
 
 static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     if (!t) {
@@ -33,6 +34,11 @@ static bool ggml_metal_lightning_indexer_parallel_requested() {
 
 static bool ggml_metal_glm_dsa_dispatch_log_enabled() {
     const char * value = getenv("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH");
+    return value && atoi(value) != 0;
+}
+
+static bool ggml_metal_glm_dsa_topk_moe_fusion_enabled() {
+    const char * value = getenv("SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION");
     return value && atoi(value) != 0;
 }
 
@@ -89,6 +95,18 @@ static const char * ggml_metal_tensor_name(const ggml_tensor * tensor) {
     return tensor != nullptr && tensor->name[0] != '\0' ? tensor->name : "<unnamed>";
 }
 
+static void ggml_metal_log_topk_moe_route_encode_candidate(ggml_metal_op_t ctx, int idx, const char * reason);
+
+struct ggml_metal_topk_moe_route_fusion {
+    ggml_tensor * logits = nullptr;
+    ggml_tensor * ids = nullptr;
+    ggml_tensor * weights = nullptr;
+    ggml_tensor * bias = nullptr;
+    ggml_tensor * clamp = nullptr;
+    ggml_tensor * scale = nullptr;
+    int n_fuse = 0;
+};
+
 struct ggml_metal_op {
     ggml_metal_op(
         ggml_metal_device_t dev,
@@ -141,6 +159,35 @@ struct ggml_metal_op {
         return ggml_graph_node(gf, idxs[i]);
     }
 
+    int graph_index(int i) const {
+        assert(i >= 0 && i < (int) idxs.size());
+        return idxs[i];
+    }
+
+    int graph_node_count() const {
+        return gf->n_nodes;
+    }
+
+    ggml_tensor * graph_node(int i) const {
+        assert(i >= 0 && i < gf->n_nodes);
+        return ggml_graph_node(gf, i);
+    }
+
+    int filtered_count_for_graph_span(int i0, int graph_count) const {
+        const int graph_start = graph_index(i0);
+        const int graph_end = graph_start + graph_count;
+        int count = 0;
+        for (int i = i0; i < (int) idxs.size() && idxs[i] < graph_end; ++i) {
+            ++count;
+        }
+        return count;
+    }
+
+    bool can_fuse_graph_subgraph(int graph_i0, const ggml_op * ops, int n_ops, const int * outputs, int n_outputs) const {
+        assert(use_fusion);
+        return ggml_can_fuse_subgraph(gf, graph_i0, n_ops, ops, outputs, n_outputs);
+    }
+
     bool can_fuse(int i0, const ggml_op * ops, int n_ops) const {
         assert(use_fusion);
         assert(i0 >= 0 && i0 < n_nodes());
@@ -150,6 +197,23 @@ struct ggml_metal_op {
         }
 
         return ggml_can_fuse_ext(gf, idxs.data() + i0, ops, n_ops);
+    }
+
+    bool can_fuse_subgraph(int i0, const ggml_op * ops, int n_ops, const int * output_offsets, int n_outputs) const {
+        assert(use_fusion);
+        assert(i0 >= 0 && i0 < n_nodes());
+
+        if (i0 + n_ops > n_nodes()) {
+            return false;
+        }
+
+        int outputs[4];
+        GGML_ASSERT(n_outputs <= 4);
+        for (int i = 0; i < n_outputs; ++i) {
+            outputs[i] = idxs[i0 + output_offsets[i]];
+        }
+
+        return ggml_can_fuse_subgraph_ext(gf, idxs.data() + i0, n_ops, ops, outputs, n_outputs);
     }
 
     ggml_metal_device_t  dev;
@@ -234,6 +298,230 @@ static bool ggml_metal_op_concurrency_add(ggml_metal_op_t ctx, const ggml_tensor
     }
 
     return ggml_mem_ranges_add(ctx->mem_ranges, node);
+}
+
+static void ggml_metal_log_topk_moe_route_encode_candidate(ggml_metal_op_t ctx, int idx, const char * reason) {
+    if (!ggml_metal_glm_dsa_dispatch_log_enabled() || idx >= ctx->n_nodes()) {
+        return;
+    }
+
+    const ggml_tensor * node = ctx->node(idx);
+    if (node->name[0] == '\0' || std::strstr(node->name, "ffn_moe_probs") == nullptr) {
+        return;
+    }
+
+    char ops[512] = {};
+    size_t offset = 0;
+    for (int j = idx; j < ctx->n_nodes() && j < idx + 14 && offset < sizeof(ops); ++j) {
+        const ggml_tensor * t = ctx->node(j);
+        const int written = snprintf(
+                ops + offset,
+                sizeof(ops) - offset,
+                "%s%s/%s",
+                j == idx ? "" : ",",
+                ggml_op_name(t->op),
+                ggml_metal_tensor_name(t));
+        if (written < 0) {
+            break;
+        }
+        offset += (size_t) written;
+    }
+
+    GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=topk_moe_route_encode tensor=%s candidate=%s reason=%s filtered_nodes=%d graph_nodes=%d graph_idx=%d grid_x=1 grid_y=1 grid_z=1 threads_x=1\n",
+            ggml_metal_tensor_name(node),
+            ops,
+            reason,
+            ctx->n_nodes(),
+            ctx->graph_node_count(),
+            ctx->graph_index(idx));
+}
+
+static bool ggml_metal_match_topk_moe_route_fusion(
+        ggml_metal_op_t ctx,
+        int idx,
+        ggml_metal_topk_moe_route_fusion & fusion) {
+    if (!ctx->use_fusion || !ggml_metal_glm_dsa_topk_moe_fusion_enabled()) {
+        ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "disabled_or_short");
+        return false;
+    }
+
+    const int graph_idx = ctx->graph_index(idx);
+    if (graph_idx + 11 > ctx->graph_node_count()) {
+        ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "disabled_or_short");
+        return false;
+    }
+
+    ggml_tensor * sigmoid = ctx->graph_node(graph_idx);
+    if (sigmoid->op != GGML_OP_UNARY || ggml_get_unary_op(sigmoid) != GGML_UNARY_OP_SIGMOID ||
+            sigmoid->src[0] == nullptr || sigmoid->src[0]->type != GGML_TYPE_F32) {
+        ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "not_sigmoid");
+        return false;
+    }
+
+    ggml_tensor * reshape_probs = ctx->graph_node(graph_idx + 1);
+    ggml_tensor * biased_probs  = ctx->graph_node(graph_idx + 2);
+    ggml_tensor * argsort       = ctx->graph_node(graph_idx + 3);
+    ggml_tensor * ids           = ctx->graph_node(graph_idx + 4);
+    ggml_tensor * get_rows      = ctx->graph_node(graph_idx + 5);
+    ggml_tensor * weights_2d    = ctx->graph_node(graph_idx + 6);
+    ggml_tensor * weights_sum   = ctx->graph_node(graph_idx + 7);
+    ggml_tensor * clamp         = ctx->graph_node(graph_idx + 8);
+    ggml_tensor * div           = ctx->graph_node(graph_idx + 9);
+    ggml_tensor * weights_3d    = ctx->graph_node(graph_idx + 10);
+
+    if (reshape_probs->op != GGML_OP_RESHAPE || reshape_probs->src[0] != sigmoid ||
+            biased_probs->op != GGML_OP_ADD || biased_probs->src[0] != sigmoid ||
+            biased_probs->src[1] == nullptr || biased_probs->src[1]->type != GGML_TYPE_F32 ||
+            argsort->op != GGML_OP_ARGSORT || argsort->src[0] != biased_probs ||
+            ids->op != GGML_OP_VIEW || ids->src[0] != argsort || ids->type != GGML_TYPE_I32 ||
+            get_rows->op != GGML_OP_GET_ROWS || get_rows->src[0] != reshape_probs || get_rows->src[1] != ids ||
+            weights_2d->op != GGML_OP_RESHAPE || weights_2d->src[0] != get_rows ||
+            weights_sum->op != GGML_OP_SUM_ROWS || weights_sum->src[0] != weights_2d ||
+            clamp->op != GGML_OP_CLAMP || clamp->src[0] != weights_sum ||
+            div->op != GGML_OP_DIV || div->src[0] != weights_2d || div->src[1] != clamp ||
+            weights_3d->op != GGML_OP_RESHAPE || weights_3d->src[0] != div) {
+        ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "shape_or_sequence");
+        return false;
+    }
+
+    ggml_tensor * weights = weights_3d;
+    int graph_n_fuse = 11;
+    ggml_tensor * scale = nullptr;
+    if (graph_idx + 11 < ctx->graph_node_count()) {
+        ggml_tensor * maybe_scale = ctx->graph_node(graph_idx + 11);
+        if (maybe_scale->op == GGML_OP_SCALE && maybe_scale->src[0] == weights_3d) {
+            weights = maybe_scale;
+            scale = maybe_scale;
+            graph_n_fuse = 12;
+        }
+    }
+
+    if (ids->ne[0] <= 0 || ids->ne[0] > 16 || ids->ne[1] != sigmoid->ne[1] ||
+            sigmoid->ne[0] > 1024 || sigmoid->ne[1] <= 0 ||
+            weights->type != GGML_TYPE_F32 || weights->ne[0] != 1 || weights->ne[1] != ids->ne[0] ||
+            weights->ne[2] != ids->ne[1]) {
+        ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "shape");
+        return false;
+    }
+
+    const ggml_op ops_with_scale[] = {
+        GGML_OP_UNARY,
+        GGML_OP_RESHAPE,
+        GGML_OP_ADD,
+        GGML_OP_ARGSORT,
+        GGML_OP_VIEW,
+        GGML_OP_GET_ROWS,
+        GGML_OP_RESHAPE,
+        GGML_OP_SUM_ROWS,
+        GGML_OP_CLAMP,
+        GGML_OP_DIV,
+        GGML_OP_RESHAPE,
+        GGML_OP_SCALE,
+    };
+    const ggml_op ops_without_scale[] = {
+        GGML_OP_UNARY,
+        GGML_OP_RESHAPE,
+        GGML_OP_ADD,
+        GGML_OP_ARGSORT,
+        GGML_OP_VIEW,
+        GGML_OP_GET_ROWS,
+        GGML_OP_RESHAPE,
+        GGML_OP_SUM_ROWS,
+        GGML_OP_CLAMP,
+        GGML_OP_DIV,
+        GGML_OP_RESHAPE,
+    };
+    const int outputs[] = { graph_idx + 4, graph_idx + graph_n_fuse - 1 };
+    if (!ctx->can_fuse_graph_subgraph(
+                graph_idx,
+                scale ? ops_with_scale : ops_without_scale,
+                graph_n_fuse,
+                outputs,
+                2)) {
+        ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "can_fuse");
+        return false;
+    }
+
+    ggml_metal_log_topk_moe_route_encode_candidate(ctx, idx, "fused");
+    fusion.logits  = sigmoid->src[0];
+    fusion.ids     = ids;
+    fusion.weights = weights;
+    fusion.bias    = biased_probs->src[1];
+    fusion.clamp   = clamp;
+    fusion.scale   = scale;
+    fusion.n_fuse  = ctx->filtered_count_for_graph_span(idx, graph_n_fuse);
+    return true;
+}
+
+static int ggml_metal_op_topk_moe_route_fused(ggml_metal_op_t ctx, int idx) {
+    ggml_metal_topk_moe_route_fusion fusion;
+    if (!ggml_metal_match_topk_moe_route_fusion(ctx, idx, fusion)) {
+        return 0;
+    }
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_TENSOR_LOCALS(uint64_t, nb_logits, fusion.logits,  nb);
+    GGML_TENSOR_LOCALS(uint64_t, nb_bias,   fusion.bias,    nb);
+    GGML_TENSOR_LOCALS(uint64_t, nb_ids,    fusion.ids,     nb);
+    GGML_TENSOR_LOCALS(uint64_t, nb_weights,fusion.weights, nb);
+
+    const float scale = fusion.scale ? ggml_get_op_params_f32(fusion.scale, 0) : 1.0f;
+    const float clamp_min = ggml_get_op_params_f32(fusion.clamp, 0);
+
+    ggml_metal_kargs_topk_moe_route args = {
+        /*.n_expert    =*/ (int32_t) fusion.logits->ne[0],
+        /*.n_tokens    =*/ (int32_t) fusion.logits->ne[1],
+        /*.top_k       =*/ (int32_t) fusion.ids->ne[0],
+        /*.has_bias    =*/ fusion.bias ? 1 : 0,
+        /*.norm        =*/ 1,
+        /*._pad0       =*/ 0,
+        /*._pad1       =*/ 0,
+        /*._pad2       =*/ 0,
+        /*.scale       =*/ scale,
+        /*.clamp_min   =*/ clamp_min,
+        /*.logits_nb0  =*/ nb_logits0,
+        /*.logits_nb1  =*/ nb_logits1,
+        /*.bias_nb0    =*/ nb_bias0,
+        /*.ids_nb0     =*/ nb_ids0,
+        /*.ids_nb1     =*/ nb_ids1,
+        /*.weights_nb1 =*/ nb_weights1,
+        /*.weights_nb2 =*/ nb_weights2,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_topk_moe_route(lib);
+
+    ggml_metal_op_concurrency_reset(ctx);
+
+    int ida = 0;
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),                         ida++);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(fusion.logits),      ida++);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(fusion.bias),        ida++);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(fusion.ids),         ida++);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(fusion.weights),     ida++);
+
+    const int nth = 1;
+    if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+        GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=topk_moe_route_fused tensor=%s logits=%s ids=%s weights=%s experts=%d tokens=%d top_k=%d fused_nodes=%d scale=%g grid_x=%d grid_y=1 grid_z=1 threads_x=%d\n",
+            ggml_metal_tensor_name(ctx->node(idx)),
+            ggml_metal_tensor_name(fusion.logits),
+            ggml_metal_tensor_name(fusion.ids),
+            ggml_metal_tensor_name(fusion.weights),
+            args.n_expert,
+            args.n_tokens,
+            args.top_k,
+            fusion.n_fuse,
+            (double) args.scale,
+            args.n_tokens,
+            nth);
+    }
+    ggml_metal_encoder_dispatch_threadgroups(enc, args.n_tokens, 1, 1, nth, 1, 1);
+
+    return fusion.n_fuse;
 }
 
 static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
@@ -324,6 +612,14 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
                         node->name);
             }
         }
+    }
+
+    if (node->op == GGML_OP_UNARY) {
+        n_fuse = ggml_metal_op_topk_moe_route_fused(ctx, idx);
+        if (n_fuse > 0) {
+            goto done;
+        }
+        n_fuse = 1;
     }
 
     switch (node->op) {
@@ -555,6 +851,7 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             }
     }
 
+done:
     if (ctx->debug_graph > 0) {
         if (n_fuse > 1) {
             GGML_LOG_DEBUG("%s:               fuse %d ops\n", __func__, n_fuse);

@@ -1222,6 +1222,26 @@ typedef struct {
 } ggml_metal_kargs_argsort_merge;
 
 typedef struct {
+    int32_t  n_expert;
+    int32_t  n_tokens;
+    int32_t  top_k;
+    int32_t  has_bias;
+    int32_t  norm;
+    int32_t  _pad0;
+    int32_t  _pad1;
+    int32_t  _pad2;
+    float    scale;
+    float    clamp_min;
+    uint64_t logits_nb0;
+    uint64_t logits_nb1;
+    uint64_t bias_nb0;
+    uint64_t ids_nb0;
+    uint64_t ids_nb1;
+    uint64_t weights_nb1;
+    uint64_t weights_nb2;
+} ggml_metal_kargs_topk_moe_route;
+
+typedef struct {
     int64_t  ne0;
     float    start;
     float    step;

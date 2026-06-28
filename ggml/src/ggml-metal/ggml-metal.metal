@@ -5805,6 +5805,75 @@ kernel void kernel_argsort_f32_i32(
 template [[host_name("kernel_argsort_f32_i32_asc")]]  kernel argsort_t kernel_argsort_f32_i32<GGML_SORT_ORDER_ASC>;
 template [[host_name("kernel_argsort_f32_i32_desc")]] kernel argsort_t kernel_argsort_f32_i32<GGML_SORT_ORDER_DESC>;
 
+kernel void kernel_topk_moe_route_f32_i32(
+        constant ggml_metal_kargs_topk_moe_route & args,
+        device const char    * logits,
+        device const char    * bias,
+        device       char    * ids,
+        device       char    * weights,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]]) {
+    if (tpitg.x != 0) {
+        return;
+    }
+
+    constexpr int32_t MAX_TOP_K = 16;
+    float   top_scores[MAX_TOP_K];
+    float   top_probs[MAX_TOP_K];
+    int32_t top_ids[MAX_TOP_K];
+
+    const int32_t token = tgpig.x;
+    if (token >= args.n_tokens || args.top_k <= 0 || args.top_k > MAX_TOP_K) {
+        return;
+    }
+
+    for (int32_t i = 0; i < args.top_k; ++i) {
+        top_scores[i] = -INFINITY;
+        top_probs[i]  = 0.0f;
+        top_ids[i]    = -1;
+    }
+
+    for (int32_t expert = 0; expert < args.n_expert; ++expert) {
+        const float logit = ((device const float *) (logits + expert*args.logits_nb0 + token*args.logits_nb1))[0];
+        const float prob  = 1.0f/(1.0f + exp(-logit));
+        const float score = prob + (args.has_bias ? ((device const float *) (bias + expert*args.bias_nb0))[0] : 0.0f);
+
+        if (score <= top_scores[args.top_k - 1]) {
+            continue;
+        }
+
+        int32_t pos = args.top_k - 1;
+        while (pos > 0 && score > top_scores[pos - 1]) {
+            top_scores[pos] = top_scores[pos - 1];
+            top_probs[pos]  = top_probs[pos - 1];
+            top_ids[pos]    = top_ids[pos - 1];
+            --pos;
+        }
+        top_scores[pos] = score;
+        top_probs[pos]  = prob;
+        top_ids[pos]    = expert;
+    }
+
+    float sum = 0.0f;
+    if (args.norm) {
+        for (int32_t i = 0; i < args.top_k; ++i) {
+            sum += top_probs[i];
+        }
+        sum = max(sum, args.clamp_min);
+    }
+
+    for (int32_t i = 0; i < args.top_k; ++i) {
+        float weight = top_probs[i];
+        if (args.norm) {
+            weight /= sum;
+        }
+        weight *= args.scale;
+
+        ((device int32_t *) (ids + i*args.ids_nb0 + token*args.ids_nb1))[0] = top_ids[i];
+        ((device float *) (weights + i*args.weights_nb1 + token*args.weights_nb2))[0] = weight;
+    }
+}
+
 typedef void (argsort_merge_t)(
         constant   ggml_metal_kargs_argsort_merge & args,
         device const char    * src0,
