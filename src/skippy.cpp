@@ -1872,8 +1872,8 @@ static skippy_glm_dsa_op_stat skippy_glm_dsa_indexer_topk_stat(const skippy_glm_
     return skippy_glm_dsa_indexer_topk_stat_from_stats(timing.stats);
 }
 
-static void skippy_glm_dsa_print_op_stat(const char * name, const skippy_glm_dsa_op_stat & stat) {
-    std::fprintf(stderr,
+static void skippy_glm_dsa_append_op_stat(std::string & line, const char * name, const skippy_glm_dsa_op_stat & stat) {
+    line += format(
             " %s_nodes=%llu %s_us=%lld",
             name,
             static_cast<unsigned long long>(stat.nodes),
@@ -1881,10 +1881,11 @@ static void skippy_glm_dsa_print_op_stat(const char * name, const skippy_glm_dsa
             static_cast<long long>(stat.elapsed_us));
 }
 
-static void skippy_glm_dsa_print_op_kind(
+static void skippy_glm_dsa_append_op_kind(
+        std::string & line,
         skippy_glm_dsa_op_kind kind,
         const skippy_glm_dsa_op_stat & stat) {
-    skippy_glm_dsa_print_op_stat(skippy_glm_dsa_op_name(kind), stat);
+    skippy_glm_dsa_append_op_stat(line, skippy_glm_dsa_op_name(kind), stat);
 }
 
 static void skippy_glm_dsa_print_op_group(
@@ -1900,24 +1901,24 @@ static void skippy_glm_dsa_print_op_group(
         return;
     }
 
-    std::fprintf(stderr,
+    std::string line = format(
             "skippy: glm_dsa_group_timing stage=%d tokens=%zu group=%s total_us=%lld",
             timing.stage_index,
             timing.token_count,
             group.name,
             static_cast<long long>(total_us));
-    skippy_glm_dsa_print_op_stat("indexer_topk", skippy_glm_dsa_indexer_topk_stat_from_stats(group.stats));
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_INDEXER, group.stats[SKIPPY_GLM_DSA_OP_INDEXER]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_TOP_K, group.stats[SKIPPY_GLM_DSA_OP_TOP_K]);
-    skippy_glm_dsa_print_op_stat("sparse_mask", skippy_glm_dsa_sparse_mask_stat_from_stats(group.stats));
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, group.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_MLA_ATTENTION, group.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_ROUTED_MOE, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SHARED_EXPERT, group.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
-    std::fprintf(stderr, "\n");
+    skippy_glm_dsa_append_op_stat(line, "indexer_topk", skippy_glm_dsa_indexer_topk_stat_from_stats(group.stats));
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_INDEXER, group.stats[SKIPPY_GLM_DSA_OP_INDEXER]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_TOP_K, group.stats[SKIPPY_GLM_DSA_OP_TOP_K]);
+    skippy_glm_dsa_append_op_stat(line, "sparse_mask", skippy_glm_dsa_sparse_mask_stat_from_stats(group.stats));
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, group.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_MLA_ATTENTION, group.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SHARED_EXPERT, group.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
+    LLAMA_LOG_INFO("%s\n", line.c_str());
 }
 
 static void skippy_glm_dsa_op_timing_begin(skippy_session * session, size_t token_count) {
@@ -1967,23 +1968,23 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
         return;
     }
 
-    std::fprintf(stderr,
+    std::string line = format(
             "skippy: glm_dsa_op_timing stage=%d tokens=%zu total_us=%lld",
             timing.stage_index,
             timing.token_count,
             static_cast<long long>(total_us));
-    skippy_glm_dsa_print_op_stat("indexer_topk", skippy_glm_dsa_indexer_topk_stat(timing));
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_INDEXER, timing.stats[SKIPPY_GLM_DSA_OP_INDEXER]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_TOP_K, timing.stats[SKIPPY_GLM_DSA_OP_TOP_K]);
-    skippy_glm_dsa_print_op_stat("sparse_mask", skippy_glm_dsa_sparse_mask_stat(timing));
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, timing.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_MLA_ATTENTION, timing.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_ROUTED_MOE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
-    skippy_glm_dsa_print_op_kind(SKIPPY_GLM_DSA_OP_SHARED_EXPERT, timing.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
-    std::fprintf(stderr, "\n");
+    skippy_glm_dsa_append_op_stat(line, "indexer_topk", skippy_glm_dsa_indexer_topk_stat(timing));
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_INDEXER, timing.stats[SKIPPY_GLM_DSA_OP_INDEXER]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_TOP_K, timing.stats[SKIPPY_GLM_DSA_OP_TOP_K]);
+    skippy_glm_dsa_append_op_stat(line, "sparse_mask", skippy_glm_dsa_sparse_mask_stat(timing));
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_FILL]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, timing.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_MLA_ATTENTION, timing.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SHARED_EXPERT, timing.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
+    LLAMA_LOG_INFO("%s\n", line.c_str());
 
     for (size_t i = 0; i < SKIPPY_GLM_DSA_TIMING_GROUP_LIMIT; ++i) {
         if (timing.groups[i].used) {
