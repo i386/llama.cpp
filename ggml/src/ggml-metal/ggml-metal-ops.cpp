@@ -31,6 +31,15 @@ static bool ggml_metal_lightning_indexer_parallel_requested() {
     return value && atoi(value) != 0;
 }
 
+static bool ggml_metal_glm_dsa_dispatch_log_enabled() {
+    const char * value = getenv("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH");
+    return value && atoi(value) != 0;
+}
+
+static const char * ggml_metal_tensor_name(const ggml_tensor * tensor) {
+    return tensor != nullptr && tensor->name[0] != '\0' ? tensor->name : "<unnamed>";
+}
+
 struct ggml_metal_op {
     ggml_metal_op(
         ggml_metal_device_t dev,
@@ -4444,7 +4453,35 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[2]), ida++); // weights
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         ida++); // dst
 
-    ggml_metal_encoder_dispatch_threadgroups(enc, parallel ? ne0 : (ne0 + nth - 1)/nth, ne1, ne3, nth, 1, 1);
+    const int grid_x = parallel ? ne0 : (ne0 + nth - 1)/nth;
+    const int grid_y = ne1;
+    const int grid_z = ne3;
+    if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+        GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=lightning_indexer tensor=%s parallel=%d q_type=%s k_type=%s dst_type=%s q_ne0=%lld q_ne1=%lld q_ne2=%lld q_ne3=%lld k_ne0=%lld k_ne1=%lld k_ne2=%lld k_ne3=%lld dst_ne0=%lld dst_ne1=%lld dst_ne2=%lld dst_ne3=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
+            ggml_metal_tensor_name(op),
+            parallel ? 1 : 0,
+            ggml_type_name(op->src[0]->type),
+            ggml_type_name(op->src[1]->type),
+            ggml_type_name(op->type),
+            (long long) ne00,
+            (long long) ne01,
+            (long long) ne02,
+            (long long) ne03,
+            (long long) ne10,
+            (long long) ne11,
+            (long long) ne12,
+            (long long) ne13,
+            (long long) ne0,
+            (long long) ne1,
+            (long long) ne2,
+            (long long) ne3,
+            grid_x,
+            grid_y,
+            grid_z,
+            nth);
+    }
+    ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, nth, 1, 1);
 
     return 1;
 }
@@ -4491,7 +4528,27 @@ int ggml_metal_op_dsa_sparse_mask(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op), 1);
 
     const int nth_fill = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline_fill));
-    ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nth_fill - 1)/nth_fill, ne02, ne03, nth_fill, 1, 1);
+    const int fill_grid_x = (ne01 + nth_fill - 1)/nth_fill;
+    const int fill_grid_y = ne02;
+    const int fill_grid_z = ne03;
+    if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+        GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_mask kernel=fill tensor=%s src_type=%s top_k_type=%s dst_type=%s kv=%lld batch=%lld stream=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
+            ggml_metal_tensor_name(op),
+            ggml_type_name(op->src[0]->type),
+            ggml_type_name(op->src[1]->type),
+            ggml_type_name(op->type),
+            (long long) ne01,
+            (long long) ne02,
+            (long long) ne03,
+            (long long) ne10,
+            (long long) ne12,
+            fill_grid_x,
+            fill_grid_y,
+            fill_grid_z,
+            nth_fill);
+    }
+    ggml_metal_encoder_dispatch_threadgroups(enc, fill_grid_x, fill_grid_y, fill_grid_z, nth_fill, 1, 1);
 
     ggml_metal_op_concurrency_reset(ctx);
 
@@ -4502,7 +4559,27 @@ int ggml_metal_op_dsa_sparse_mask(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
     const int nth_set = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline_set));
-    ggml_metal_encoder_dispatch_threadgroups(enc, (ne10 + nth_set - 1)/nth_set, ne11, ne03, nth_set, 1, 1);
+    const int set_grid_x = (ne10 + nth_set - 1)/nth_set;
+    const int set_grid_y = ne11;
+    const int set_grid_z = ne03;
+    if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+        GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_mask kernel=set tensor=%s src_type=%s top_k_type=%s dst_type=%s kv=%lld batch=%lld stream=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
+            ggml_metal_tensor_name(op),
+            ggml_type_name(op->src[0]->type),
+            ggml_type_name(op->src[1]->type),
+            ggml_type_name(op->type),
+            (long long) ne01,
+            (long long) ne02,
+            (long long) ne03,
+            (long long) ne10,
+            (long long) ne12,
+            set_grid_x,
+            set_grid_y,
+            set_grid_z,
+            nth_set);
+    }
+    ggml_metal_encoder_dispatch_threadgroups(enc, set_grid_x, set_grid_y, set_grid_z, nth_set, 1, 1);
 
     return 1;
 }
@@ -4556,7 +4633,33 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         ida++); // dst
 
     const int nth = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
-    ggml_metal_encoder_dispatch_threadgroups(enc, ne1, ne2, ne3, nth, 1, 1);
+    const int grid_x = ne1;
+    const int grid_y = ne2;
+    const int grid_z = ne3;
+    if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+        GGML_LOG_INFO(
+            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn tensor=%s q_type=%s k_type=%s v_type=%s mask_type=%s top_k_type=%s dst_type=%s q_width=%lld v_width=%lld batch=%lld heads=%lld stream=%lld kv=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
+            ggml_metal_tensor_name(op),
+            ggml_type_name(op->src[0]->type),
+            ggml_type_name(op->src[1]->type),
+            ggml_type_name(op->src[2]->type),
+            ggml_type_name(op->src[3]->type),
+            ggml_type_name(op->src[4]->type),
+            ggml_type_name(op->type),
+            (long long) ne00,
+            (long long) ne20,
+            (long long) ne1,
+            (long long) ne2,
+            (long long) ne3,
+            (long long) ne11,
+            (long long) ne40,
+            (long long) ne42,
+            grid_x,
+            grid_y,
+            grid_z,
+            nth);
+    }
+    ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, nth, 1, 1);
 
     return 1;
 }
