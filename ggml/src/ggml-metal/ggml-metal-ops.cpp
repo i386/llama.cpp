@@ -54,6 +54,11 @@ static int ggml_metal_glm_dsa_sparse_attn_threads_requested() {
     }
 }
 
+static bool ggml_metal_glm_dsa_sparse_attn_cache_topk_enabled() {
+    const char * value = getenv("SKIPPY_GLM_DSA_SPARSE_ATTN_CACHE_TOPK");
+    return value && atoi(value) != 0;
+}
+
 static const char * ggml_metal_tensor_name(const ggml_tensor * tensor) {
     return tensor != nullptr && tensor->name[0] != '\0' ? tensor->name : "<unnamed>";
 }
@@ -4637,7 +4642,10 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
         /*.scale =*/ ggml_get_op_params_f32(op, 0),
     };
 
-    auto pipeline = ggml_metal_library_get_pipeline_dsa_sparse_attn(lib, op);
+    const bool use_cached_topk = ggml_metal_glm_dsa_sparse_attn_cache_topk_enabled() && ne40 <= 1024;
+    auto pipeline = use_cached_topk
+        ? ggml_metal_library_get_pipeline_dsa_sparse_attn_cached_topk(lib, op)
+        : ggml_metal_library_get_pipeline_dsa_sparse_attn(lib, op);
 
     int ida = 0;
 
@@ -4657,7 +4665,8 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
     const int grid_z = ne3;
     if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
         GGML_LOG_INFO(
-            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn tensor=%s q_type=%s k_type=%s v_type=%s mask_type=%s top_k_type=%s dst_type=%s q_width=%lld v_width=%lld batch=%lld heads=%lld stream=%lld kv=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
+            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn kernel=%s tensor=%s q_type=%s k_type=%s v_type=%s mask_type=%s top_k_type=%s dst_type=%s q_width=%lld v_width=%lld batch=%lld heads=%lld stream=%lld kv=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
+            use_cached_topk ? "cached_topk" : "default",
             ggml_metal_tensor_name(op),
             ggml_type_name(op->src[0]->type),
             ggml_type_name(op->src[1]->type),
