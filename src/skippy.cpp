@@ -1477,6 +1477,22 @@ static bool skippy_glm_dsa_tensor_trace_stats_enabled() {
     return skippy_env_enabled("SKIPPY_GLM_DSA_TENSOR_TRACE_STATS");
 }
 
+static bool skippy_glm_dsa_direct_sparse_decision_log_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS");
+}
+
+static bool skippy_glm_dsa_direct_sparse_attn_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN");
+}
+
+static bool skippy_glm_dsa_direct_sparse_prefill_enabled() {
+    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL");
+}
+
+static uint32_t skippy_glm_dsa_direct_sparse_prefill_max_tokens() {
+    return skippy_env_u32("SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MAX_TOKENS", 32, 1, 4096);
+}
+
 static bool skippy_name_starts_with(const char * name, const char * prefix) {
     return name != nullptr && std::strncmp(name, prefix, std::strlen(prefix)) == 0;
 }
@@ -1565,6 +1581,83 @@ static void skippy_glm_dsa_group_name_for_tensor(
         ++layer_len;
     }
     std::snprintf(group_name, group_name_size, "layer_%.*s", static_cast<int>(layer_len), layer);
+}
+
+static int skippy_glm_dsa_layer_from_group_name(const char * group_name) {
+    const char * prefix = "layer_";
+    if (!skippy_name_starts_with(group_name, prefix)) {
+        return -1;
+    }
+
+    const char * layer = group_name + std::strlen(prefix);
+    if (layer[0] == '\0') {
+        return -1;
+    }
+
+    char * end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(layer, &end, 10);
+    if (errno != 0 || end == layer || *end != '\0' || parsed < 0 || parsed > std::numeric_limits<int>::max()) {
+        return -1;
+    }
+
+    return static_cast<int>(parsed);
+}
+
+static void skippy_glm_dsa_log_direct_sparse_decision_for_tensor(
+        const skippy_glm_dsa_op_timing & timing,
+        const ggml_tensor * tensor,
+        skippy_glm_dsa_op_kind kind) {
+    if (!skippy_glm_dsa_direct_sparse_decision_log_enabled() || tensor == nullptr) {
+        return;
+    }
+
+    const ggml_tensor * top_k = nullptr;
+    bool use_direct = false;
+    if (kind == SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN && tensor->op == GGML_OP_DSA_SPARSE_ATTN) {
+        top_k = tensor->src[4];
+        use_direct = true;
+    } else if ((kind == SKIPPY_GLM_DSA_OP_SPARSE_MASK_TOPK || kind == SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD) &&
+               tensor->op == GGML_OP_DSA_SPARSE_MASK) {
+        top_k = tensor->src[1];
+    } else {
+        return;
+    }
+
+    char group_name[SKIPPY_GLM_DSA_TIMING_GROUP_NAME_SIZE] = {};
+    skippy_glm_dsa_group_name_for_tensor(tensor->name, group_name, sizeof(group_name));
+    const int layer = skippy_glm_dsa_layer_from_group_name(group_name);
+    const int64_t sparse_batch = top_k != nullptr ? top_k->ne[1] : -1;
+    const int64_t sparse_streams = top_k != nullptr ? top_k->ne[2] : -1;
+    const uint32_t prefill_cap = skippy_glm_dsa_direct_sparse_prefill_max_tokens();
+    const bool prefill_enabled = skippy_glm_dsa_direct_sparse_prefill_enabled();
+    const bool decode_shape =
+            sparse_streams > 0 &&
+            sparse_batch == 1 &&
+            timing.token_count == static_cast<size_t>(sparse_streams);
+    const bool prefill_shape =
+            prefill_enabled &&
+            sparse_batch >= 1 &&
+            sparse_batch <= static_cast<int64_t>(prefill_cap);
+    const bool token_shape_allowed = decode_shape || prefill_shape;
+
+    LLAMA_LOG_INFO(
+            "skippy: glm_dsa_direct_sparse_decision layer=%d ubatch_tokens=%lld sparse_batch=%lld sparse_streams=%lld prefill_cap=%lld direct_enabled=%d prefill_enabled=%d decode_shape=%d prefill_shape=%d token_shape_allowed=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d use_direct=%d\n",
+            layer,
+            static_cast<long long>(timing.token_count),
+            static_cast<long long>(sparse_batch),
+            static_cast<long long>(sparse_streams),
+            static_cast<long long>(prefill_cap),
+            skippy_glm_dsa_direct_sparse_attn_enabled() ? 1 : 0,
+            prefill_enabled ? 1 : 0,
+            decode_shape ? 1 : 0,
+            prefill_shape ? 1 : 0,
+            token_shape_allowed ? 1 : 0,
+            1,
+            1,
+            1,
+            1,
+            use_direct ? 1 : 0);
 }
 
 static skippy_glm_dsa_op_group * skippy_glm_dsa_op_timing_group(
@@ -1838,6 +1931,7 @@ static bool skippy_glm_dsa_op_timing_cb(ggml_tensor * tensor, bool ask, void * u
     timing.stats[kind].nodes += 1;
     timing.stats[kind].elapsed_us += elapsed_us;
     skippy_glm_dsa_record_group_timing(timing, kind, tensor->name, elapsed_us);
+    skippy_glm_dsa_log_direct_sparse_decision_for_tensor(timing, tensor, kind);
     skippy_glm_dsa_trace_tensor(timing, kind, tensor);
     timing.pending_kind = SKIPPY_GLM_DSA_OP_UNKNOWN;
     timing.pending_start_us = 0;
