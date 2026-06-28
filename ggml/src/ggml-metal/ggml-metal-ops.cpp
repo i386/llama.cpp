@@ -75,6 +75,16 @@ static int ggml_metal_glm_dsa_sparse_attn_decode_group_heads_requested() {
     }
 }
 
+static int ggml_metal_glm_dsa_mul_mm_id_min_tokens_requested() {
+    const char * value = getenv("SKIPPY_GLM_DSA_MUL_MM_ID_MIN_TOKENS");
+    if (value == nullptr || value[0] == '\0') {
+        return 32;
+    }
+
+    const int requested = atoi(value);
+    return requested > 0 ? requested : 32;
+}
+
 static const char * ggml_metal_tensor_name(const ggml_tensor * tensor) {
     return tensor != nullptr && tensor->name[0] != '\0' ? tensor->name : "<unnamed>";
 }
@@ -2383,7 +2393,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
     // to the matrix-vector kernel
     // ne20 = n_used_experts
     // ne21 = n_rows (batch size)
-    const int ne21_mm_id_min = 32;
+    const int ne21_mm_id_min = ggml_metal_glm_dsa_mul_mm_id_min_tokens_requested();
 
     if (props_dev->has_simdgroup_mm && ne00 >= 64 && (ne21 >= ne21_mm_id_min)) {
         // some Metal matrix data types require aligned pointers
@@ -2470,7 +2480,31 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
 
             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne21 + 31)/32, (ne01 + 63)/64, ne02, 128, 1, 1);
+            const int grid_x = (ne21 + 31)/32;
+            const int grid_y = (ne01 + 63)/64;
+            const int grid_z = ne02;
+            ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, 128, 1, 1);
+
+            if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+                GGML_LOG_INFO(
+                    "skippy: glm_dsa_metal_dispatch op=mul_mat_id kernel=mul_mm_id tensor=%s src0_type=%s src1_type=%s ids_type=%s dst_type=%s ne00=%d ne01=%d experts=%d used_experts=%d tokens=%d min_tokens=%d grid_x=%d grid_y=%d grid_z=%d threads_x=%d threads_y=%d\n",
+                    ggml_metal_tensor_name(op),
+                    ggml_type_name(op->src[0]->type),
+                    ggml_type_name(op->src[1]->type),
+                    ggml_type_name(op->src[2]->type),
+                    ggml_type_name(op->type),
+                    ne00,
+                    ne01,
+                    ne02,
+                    ne20,
+                    ne21,
+                    ne21_mm_id_min,
+                    grid_x,
+                    grid_y,
+                    grid_z,
+                    128,
+                    1);
+            }
         }
     } else {
         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
@@ -2520,13 +2554,44 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
 
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
+        int grid_x = 0;
+        int grid_y = 0;
+        const int grid_z = ne123;
         if (op->src[0]->type == GGML_TYPE_F32 ||
             op->src[0]->type == GGML_TYPE_F16 ||
             op->src[0]->type == GGML_TYPE_BF16 ||
             op->src[0]->type == GGML_TYPE_Q8_0) {
-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0 - 1)/(nr0), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
+            grid_x = (ne01 + nr0 - 1)/(nr0);
+            grid_y = (_ne1 + nr1 - 1)/nr1;
+            ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, 32, nsg, 1);
         } else {
-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0*nsg - 1)/(nr0*nsg), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
+            grid_x = (ne01 + nr0*nsg - 1)/(nr0*nsg);
+            grid_y = (_ne1 + nr1 - 1)/nr1;
+            ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, 32, nsg, 1);
+        }
+
+        if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
+            GGML_LOG_INFO(
+                "skippy: glm_dsa_metal_dispatch op=mul_mat_id kernel=mul_mv_id tensor=%s src0_type=%s src1_type=%s ids_type=%s dst_type=%s ne00=%d ne01=%d experts=%d used_experts=%d tokens=%d min_tokens=%d nr0=%d nr1=%d nsg=%d grid_x=%d grid_y=%d grid_z=%d threads_x=%d threads_y=%d\n",
+                ggml_metal_tensor_name(op),
+                ggml_type_name(op->src[0]->type),
+                ggml_type_name(op->src[1]->type),
+                ggml_type_name(op->src[2]->type),
+                ggml_type_name(op->type),
+                ne00,
+                ne01,
+                ne02,
+                ne20,
+                ne21,
+                ne21_mm_id_min,
+                nr0,
+                nr1,
+                nsg,
+                grid_x,
+                grid_y,
+                grid_z,
+                32,
+                nsg);
         }
     }
 

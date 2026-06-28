@@ -51,9 +51,16 @@ enum skippy_glm_dsa_op_kind {
     SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD = 4,
     SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN = 5,
     SKIPPY_GLM_DSA_OP_MLA_ATTENTION = 6,
-    SKIPPY_GLM_DSA_OP_ROUTED_MOE = 7,
-    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 8,
-    SKIPPY_GLM_DSA_OP_COUNT = 9,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE = 7,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP = 8,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE = 9,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP = 10,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT = 11,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN = 12,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED = 13,
+    SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE = 14,
+    SKIPPY_GLM_DSA_OP_SHARED_EXPERT = 15,
+    SKIPPY_GLM_DSA_OP_COUNT = 16,
     SKIPPY_GLM_DSA_OP_UNKNOWN = 255,
 };
 
@@ -1513,8 +1520,22 @@ static const char * skippy_glm_dsa_op_name(skippy_glm_dsa_op_kind kind) {
             return "dsa_sparse_attn";
         case SKIPPY_GLM_DSA_OP_MLA_ATTENTION:
             return "mla_attention";
-        case SKIPPY_GLM_DSA_OP_ROUTED_MOE:
-            return "routed_moe";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE:
+            return "routed_moe_route";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP:
+            return "routed_moe_gate_up";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE:
+            return "routed_moe_gate";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP:
+            return "routed_moe_up";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT:
+            return "routed_moe_act";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN:
+            return "routed_moe_down";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED:
+            return "routed_moe_weighted";
+        case SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE:
+            return "routed_moe_aggregate";
         case SKIPPY_GLM_DSA_OP_SHARED_EXPERT:
             return "shared_expert";
         case SKIPPY_GLM_DSA_OP_COUNT:
@@ -1546,10 +1567,41 @@ static skippy_glm_dsa_op_kind skippy_glm_dsa_op_kind_for_tensor(const char * nam
     if (skippy_name_starts_with(name, "kqv_out")) {
         return SKIPPY_GLM_DSA_OP_MLA_ATTENTION;
     }
-    if (skippy_name_starts_with(name, "ffn_moe_out")) {
-        return SKIPPY_GLM_DSA_OP_ROUTED_MOE;
+    if (skippy_name_starts_with(name, "ffn_moe_gate_up")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP;
     }
-    if (skippy_name_starts_with(name, "ffn_shexp")) {
+    if (skippy_name_starts_with(name, "ffn_moe_gate")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE;
+    }
+    if (skippy_name_starts_with(name, "ffn_moe_up")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP;
+    }
+    if (skippy_name_starts_with(name, "ffn_moe_silu") ||
+            skippy_name_starts_with(name, "ffn_moe_swiglu") ||
+            skippy_name_starts_with(name, "ffn_moe_geglu") ||
+            skippy_name_starts_with(name, "ffn_moe_gelu") ||
+            skippy_name_starts_with(name, "ffn_moe_reglu") ||
+            skippy_name_starts_with(name, "ffn_moe_relu")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT;
+    }
+    if (skippy_name_starts_with(name, "ffn_moe_down")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN;
+    }
+    if (skippy_name_starts_with(name, "ffn_moe_weighted")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED;
+    }
+    if (skippy_name_starts_with(name, "ffn_moe_out")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE;
+    }
+    if (skippy_name_starts_with(name, "ffn_moe_")) {
+        return SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE;
+    }
+    if (skippy_name_starts_with(name, "ffn_shexp") ||
+            skippy_name_starts_with(name, "ffn_up") ||
+            skippy_name_starts_with(name, "ffn_gate") ||
+            skippy_name_starts_with(name, "ffn_silu") ||
+            skippy_name_starts_with(name, "ffn_swiglu") ||
+            skippy_name_starts_with(name, "ffn_down")) {
         return SKIPPY_GLM_DSA_OP_SHARED_EXPERT;
     }
     return SKIPPY_GLM_DSA_OP_UNKNOWN;
@@ -1966,6 +2018,19 @@ static skippy_glm_dsa_op_stat skippy_glm_dsa_indexer_topk_stat(const skippy_glm_
     return skippy_glm_dsa_indexer_topk_stat_from_stats(timing.stats);
 }
 
+static skippy_glm_dsa_op_stat skippy_glm_dsa_routed_moe_stat_from_stats(const skippy_glm_dsa_op_stat stats[]) {
+    skippy_glm_dsa_op_stat stat = {};
+    for (int i = SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE; i <= SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE; ++i) {
+        stat.nodes += stats[i].nodes;
+        stat.elapsed_us += stats[i].elapsed_us;
+    }
+    return stat;
+}
+
+static skippy_glm_dsa_op_stat skippy_glm_dsa_routed_moe_stat(const skippy_glm_dsa_op_timing & timing) {
+    return skippy_glm_dsa_routed_moe_stat_from_stats(timing.stats);
+}
+
 static void skippy_glm_dsa_append_op_stat(std::string & line, const char * name, const skippy_glm_dsa_op_stat & stat) {
     line += format(
             " %s_nodes=%llu %s_us=%lld",
@@ -2010,7 +2075,15 @@ static void skippy_glm_dsa_print_op_group(
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, group.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, group.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_MLA_ATTENTION, group.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
-    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
+    skippy_glm_dsa_append_op_stat(line, "routed_moe", skippy_glm_dsa_routed_moe_stat_from_stats(group.stats));
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE, group.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE]);
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SHARED_EXPERT, group.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
     LLAMA_LOG_INFO("%s\n", line.c_str());
 }
@@ -2076,7 +2149,15 @@ static void skippy_glm_dsa_op_timing_end(skippy_session * session) {
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD, timing.stats[SKIPPY_GLM_DSA_OP_SPARSE_MASK_ADD]);
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN, timing.stats[SKIPPY_GLM_DSA_OP_DSA_SPARSE_ATTN]);
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_MLA_ATTENTION, timing.stats[SKIPPY_GLM_DSA_OP_MLA_ATTENTION]);
-    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE]);
+    skippy_glm_dsa_append_op_stat(line, "routed_moe", skippy_glm_dsa_routed_moe_stat(timing));
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_ROUTE]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE_UP]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_GATE]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_UP]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_ACT]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_DOWN]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_WEIGHTED]);
+    skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE, timing.stats[SKIPPY_GLM_DSA_OP_ROUTED_MOE_AGGREGATE]);
     skippy_glm_dsa_append_op_kind(line, SKIPPY_GLM_DSA_OP_SHARED_EXPERT, timing.stats[SKIPPY_GLM_DSA_OP_SHARED_EXPERT]);
     LLAMA_LOG_INFO("%s\n", line.c_str());
 
