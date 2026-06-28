@@ -59,6 +59,22 @@ static bool ggml_metal_glm_dsa_sparse_attn_cache_topk_enabled() {
     return value && atoi(value) != 0;
 }
 
+static int ggml_metal_glm_dsa_sparse_attn_decode_group_heads_requested() {
+    const char * value = getenv("SKIPPY_GLM_DSA_SPARSE_ATTN_DECODE_GROUP_HEADS");
+    if (value == nullptr || value[0] == '\0') {
+        return 1;
+    }
+
+    const int requested = atoi(value);
+    switch (requested) {
+        case 2:
+        case 4:
+            return requested;
+        default:
+            return 1;
+    }
+}
+
 static const char * ggml_metal_tensor_name(const ggml_tensor * tensor) {
     return tensor != nullptr && tensor->name[0] != '\0' ? tensor->name : "<unnamed>";
 }
@@ -4642,8 +4658,20 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
         /*.scale =*/ ggml_get_op_params_f32(op, 0),
     };
 
-    const bool use_cached_topk = ggml_metal_glm_dsa_sparse_attn_cache_topk_enabled() && ne40 <= 1024;
-    auto pipeline = use_cached_topk
+    const int requested_head_group = ggml_metal_glm_dsa_sparse_attn_decode_group_heads_requested();
+    const bool use_decode_grouped =
+        requested_head_group > 1 &&
+        ne1 == 1 &&
+        ne3 == 1 &&
+        ne40 <= 1024 &&
+        ne2 % requested_head_group == 0;
+    const bool use_cached_topk =
+        !use_decode_grouped &&
+        ggml_metal_glm_dsa_sparse_attn_cache_topk_enabled() &&
+        ne40 <= 1024;
+    auto pipeline = use_decode_grouped
+        ? ggml_metal_library_get_pipeline_dsa_sparse_attn_decode_grouped(lib, op)
+        : use_cached_topk
         ? ggml_metal_library_get_pipeline_dsa_sparse_attn_cached_topk(lib, op)
         : ggml_metal_library_get_pipeline_dsa_sparse_attn(lib, op);
 
@@ -4659,14 +4687,16 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         ida++); // dst
 
     const int nth_requested = ggml_metal_glm_dsa_sparse_attn_threads_requested();
-    const int nth = std::min(nth_requested, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    const int head_group = use_decode_grouped ? requested_head_group : 1;
+    const int max_threads_per_group = std::max(1, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)/head_group);
+    const int nth = std::min(nth_requested, max_threads_per_group);
     const int grid_x = ne1;
-    const int grid_y = ne2;
+    const int grid_y = use_decode_grouped ? (ne2 + head_group - 1)/head_group : ne2;
     const int grid_z = ne3;
     if (ggml_metal_glm_dsa_dispatch_log_enabled()) {
         GGML_LOG_INFO(
-            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn kernel=%s tensor=%s q_type=%s k_type=%s v_type=%s mask_type=%s top_k_type=%s dst_type=%s q_width=%lld v_width=%lld batch=%lld heads=%lld stream=%lld kv=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d\n",
-            use_cached_topk ? "cached_topk" : "default",
+            "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn kernel=%s tensor=%s q_type=%s k_type=%s v_type=%s mask_type=%s top_k_type=%s dst_type=%s q_width=%lld v_width=%lld batch=%lld heads=%lld stream=%lld kv=%lld top_k=%lld top_stream=%lld grid_x=%d grid_y=%d grid_z=%d threads_x=%d threads_y=%d\n",
+            use_decode_grouped ? "decode_grouped" : use_cached_topk ? "cached_topk" : "default",
             ggml_metal_tensor_name(op),
             ggml_type_name(op->src[0]->type),
             ggml_type_name(op->src[1]->type),
@@ -4685,9 +4715,10 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
             grid_x,
             grid_y,
             grid_z,
-            nth);
+            nth,
+            head_group);
     }
-    ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, nth, 1, 1);
+    ggml_metal_encoder_dispatch_threadgroups(enc, grid_x, grid_y, grid_z, nth, head_group, 1);
 
     return 1;
 }

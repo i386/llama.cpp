@@ -10047,6 +10047,212 @@ template [[host_name("kernel_dsa_sparse_attn_cached_topk_f16_f32_f16")]] kernel 
 template [[host_name("kernel_dsa_sparse_attn_cached_topk_f16_f16_f32")]] kernel kernel_dsa_sparse_attn_cached_topk_t kernel_dsa_sparse_attn_cached_topk_impl<half,  half,  float>;
 template [[host_name("kernel_dsa_sparse_attn_cached_topk_f16_f16_f16")]] kernel kernel_dsa_sparse_attn_cached_topk_t kernel_dsa_sparse_attn_cached_topk_impl<half,  half,  half>;
 
+template<typename K, typename V, typename M>
+kernel void kernel_dsa_sparse_attn_decode_grouped_impl(
+        constant ggml_metal_kargs_dsa_sparse_attn & args,
+        device const char    * q,
+        device const char    * k,
+        device const char    * v,
+        device const char    * kq_mask,
+        device const int32_t * top_k,
+        device       char    * dst,
+        uint3                 tgpig [[threadgroup_position_in_grid]],
+        uint3                 tpitg [[thread_position_in_threadgroup]],
+        uint3                 tptg  [[threads_per_threadgroup]]) {
+    constexpr int32_t DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_TOP_K = 1024;
+    constexpr int32_t DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_HEADS = 4;
+    constexpr int32_t DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_THREADS = 256;
+
+    threadgroup int32_t top_indices[DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_TOP_K];
+    threadgroup float scores[
+        DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_HEADS*
+        DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_TOP_K
+    ];
+    threadgroup float reduce[
+        DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_HEADS*
+        DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_THREADS
+    ];
+
+    const int32_t i_batch   = tgpig.x;
+    const int32_t i_stream  = tgpig.z;
+    const int32_t tid       = tpitg.x;
+    const int32_t head_lane = tpitg.y;
+    const int32_t nth       = tptg.x;
+    const int32_t n_heads_per_group = tptg.y;
+    const int32_t i_head    = tgpig.y*n_heads_per_group + head_lane;
+
+    if (i_batch >= args.ne1 ||
+            i_stream >= args.ne3 ||
+            args.ne40 > DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_TOP_K ||
+            n_heads_per_group > DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_HEADS ||
+            nth > DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_THREADS) {
+        return;
+    }
+
+    const bool valid_head = i_head < args.ne2;
+    const int32_t n_head_per_kv = args.ne2/args.ne12;
+    const int32_t n_head_per_v  = args.ne2/args.ne22;
+    const int32_t i_kv_head     = valid_head ? i_head/n_head_per_kv : 0;
+    const int32_t i_v_head      = valid_head ? i_head/n_head_per_v  : 0;
+    const int32_t i_top_stream  = i_stream%args.ne42;
+    const int32_t score_offset  = head_lane*DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_TOP_K;
+    const int32_t reduce_offset = head_lane*DSA_SPARSE_ATTN_DECODE_GROUPED_MAX_THREADS;
+
+    if (head_lane == 0) {
+        for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+            top_indices[i_top] = ((device const int32_t *) ((device const char *) top_k +
+                    i_top*args.nb40 + i_batch*args.nb41 + i_top_stream*args.nb42))[0];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float local_max = -FLT_MAX;
+    float local_active_top_end = 0.0f;
+
+    for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+        const int32_t i_kv = top_indices[i_top];
+
+        float score = -INFINITY;
+        if (valid_head && i_kv >= 0 && i_kv < args.ne11) {
+            device const M * mask_ptr = (device const M *) (kq_mask +
+                    i_kv*args.nb31 + i_batch*args.nb32 + i_stream*args.nb33);
+            const float mask = float(*mask_ptr);
+
+            if (isfinite(mask)) {
+                local_active_top_end = max(local_active_top_end, float(i_top + 1));
+
+                float qk = 0.0f;
+                int32_t i_dk = 0;
+                for (; i_dk + 3 < args.ne00; i_dk += 4) {
+                    device const float * q0_ptr = (device const float *) (q +
+                            (i_dk + 0)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const float * q1_ptr = (device const float *) (q +
+                            (i_dk + 1)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const float * q2_ptr = (device const float *) (q +
+                            (i_dk + 2)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const float * q3_ptr = (device const float *) (q +
+                            (i_dk + 3)*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const K * k0_ptr = (device const K *) (k +
+                            (i_dk + 0)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    device const K * k1_ptr = (device const K *) (k +
+                            (i_dk + 1)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    device const K * k2_ptr = (device const K *) (k +
+                            (i_dk + 2)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    device const K * k3_ptr = (device const K *) (k +
+                            (i_dk + 3)*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    qk += (*q0_ptr) * float(*k0_ptr);
+                    qk += (*q1_ptr) * float(*k1_ptr);
+                    qk += (*q2_ptr) * float(*k2_ptr);
+                    qk += (*q3_ptr) * float(*k3_ptr);
+                }
+                for (; i_dk < args.ne00; ++i_dk) {
+                    device const float * q_ptr = (device const float *) (q +
+                            i_dk*args.nb00 + i_batch*args.nb01 + i_head*args.nb02 + i_stream*args.nb03);
+                    device const K * k_ptr = (device const K *) (k +
+                            i_dk*args.nb10 + i_kv*args.nb11 + i_kv_head*args.nb12 + i_stream*args.nb13);
+                    qk += (*q_ptr) * float(*k_ptr);
+                }
+
+                score = qk*args.scale + mask;
+            }
+        }
+
+        scores[score_offset + i_top] = score;
+        local_max = max(local_max, score);
+    }
+
+    reduce[reduce_offset + tid] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int32_t stride = nth/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[reduce_offset + tid] = max(
+                    reduce[reduce_offset + tid],
+                    reduce[reduce_offset + tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float max_score = reduce[reduce_offset];
+    reduce[reduce_offset + tid] = local_active_top_end;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int32_t stride = nth/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[reduce_offset + tid] = max(
+                    reduce[reduce_offset + tid],
+                    reduce[reduce_offset + tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const int32_t active_top_end = int32_t(reduce[reduce_offset]);
+    float local_sum = 0.0f;
+
+    if (max_score > -FLT_MAX/2) {
+        for (int32_t i_top = tid; i_top < active_top_end; i_top += nth) {
+            scores[score_offset + i_top] = exp(scores[score_offset + i_top] - max_score);
+            local_sum += scores[score_offset + i_top];
+        }
+    } else {
+        for (int32_t i_top = tid; i_top < args.ne40; i_top += nth) {
+            scores[score_offset + i_top] = 0.0f;
+        }
+    }
+
+    reduce[reduce_offset + tid] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int32_t stride = nth/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[reduce_offset + tid] += reduce[reduce_offset + tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float sum_score = reduce[reduce_offset];
+    if (!valid_head) {
+        return;
+    }
+
+    for (int32_t i_dv = tid; i_dv < args.ne20; i_dv += nth) {
+        float acc = 0.0f;
+
+        if (sum_score > 0.0f && isfinite(sum_score)) {
+            for (int32_t i_top = 0; i_top < active_top_end; ++i_top) {
+                const int32_t i_kv = top_indices[i_top];
+                if (i_kv < 0 || i_kv >= args.ne11) {
+                    continue;
+                }
+
+                const float p = scores[score_offset + i_top]/sum_score;
+                if (p == 0.0f) {
+                    continue;
+                }
+
+                device const V * v_ptr = (device const V *) (v +
+                        i_dv*args.nb20 + i_kv*args.nb21 + i_v_head*args.nb22 + i_stream*args.nb23);
+                acc += p * float(*v_ptr);
+            }
+        }
+
+        device float * dst_ptr = (device float *) (dst +
+                i_dv*args.nb0 + i_batch*args.nb1 + i_head*args.nb2 + i_stream*args.nb3);
+        *dst_ptr = acc;
+    }
+}
+
+typedef decltype(kernel_dsa_sparse_attn_decode_grouped_impl<float, float, float>) kernel_dsa_sparse_attn_decode_grouped_t;
+
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f32_f32_f32")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<float, float, float>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f32_f32_f16")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<float, float, half>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f32_f16_f32")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<float, half,  float>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f32_f16_f16")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<float, half,  half>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f16_f32_f32")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<half,  float, float>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f16_f32_f16")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<half,  float, half>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f16_f16_f32")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<half,  half,  float>;
+template [[host_name("kernel_dsa_sparse_attn_decode_grouped_f16_f16_f16")]] kernel kernel_dsa_sparse_attn_decode_grouped_t kernel_dsa_sparse_attn_decode_grouped_impl<half,  half,  half>;
+
 kernel void kernel_diag_f32(
         constant ggml_metal_kargs_diag & args,
         device   const char * src0,
