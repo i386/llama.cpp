@@ -52,6 +52,16 @@ static int64_t skippy_glm_dsa_direct_sparse_prefill_max_tokens() {
     return parsed <= 0 ? INT64_MAX : parsed;
 }
 
+static int64_t skippy_glm_dsa_dense_sparse_mask_max_bytes() {
+    const char * value = getenv("SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES");
+    if (value == nullptr || value[0] == '\0') {
+        return 512LL * 1024LL * 1024LL;
+    }
+
+    const int64_t parsed = atoll(value);
+    return parsed <= 0 ? INT64_MAX : parsed;
+}
+
 static bool skippy_glm_dsa_direct_sparse_decision_log_enabled() {
     return skippy_env_enabled("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS");
 }
@@ -66,10 +76,13 @@ static void skippy_glm_dsa_log_direct_sparse_decision(
         int64_t sparse_batch,
         int64_t sparse_streams,
         int64_t prefill_cap,
+        int64_t dense_mask_bytes,
+        int64_t dense_mask_limit,
         bool    direct_enabled,
         bool    prefill_enabled,
         bool    decode_shape,
         bool    prefill_shape,
+        bool    large_prefill_shape,
         bool    token_shape_allowed,
         bool    kq_b_ok,
         bool    sinks_ok,
@@ -81,16 +94,19 @@ static void skippy_glm_dsa_log_direct_sparse_decision(
     }
 
     LLAMA_LOG_INFO(
-            "skippy: glm_dsa_direct_sparse_decision layer=%d ubatch_tokens=%lld sparse_batch=%lld sparse_streams=%lld prefill_cap=%lld direct_enabled=%d prefill_enabled=%d decode_shape=%d prefill_shape=%d token_shape_allowed=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d use_direct=%d\n",
+            "skippy: glm_dsa_direct_sparse_decision layer=%d ubatch_tokens=%lld sparse_batch=%lld sparse_streams=%lld prefill_cap=%lld dense_mask_bytes=%lld dense_mask_limit=%lld direct_enabled=%d prefill_enabled=%d decode_shape=%d prefill_shape=%d large_prefill_shape=%d token_shape_allowed=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d use_direct=%d\n",
             layer,
             (long long) ubatch_tokens,
             (long long) sparse_batch,
             (long long) sparse_streams,
             (long long) prefill_cap,
+            (long long) dense_mask_bytes,
+            (long long) dense_mask_limit,
             direct_enabled ? 1 : 0,
             prefill_enabled ? 1 : 0,
             decode_shape ? 1 : 0,
             prefill_shape ? 1 : 0,
+            large_prefill_shape ? 1 : 0,
             token_shape_allowed ? 1 : 0,
             kq_b_ok ? 1 : 0,
             sinks_ok ? 1 : 0,
@@ -2837,16 +2853,25 @@ ggml_tensor * llm_graph_context::build_attn(
 
     const int64_t n_direct_sparse_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
     const int64_t n_direct_sparse_batch = top_k_3d->ne[1];
+    const int64_t dense_sparse_mask_bytes = (int64_t) ggml_nbytes(kq_mask_rows);
+    const int64_t dense_sparse_mask_limit = skippy_glm_dsa_dense_sparse_mask_max_bytes();
+    const bool direct_sparse_prefill_enabled = skippy_glm_dsa_direct_sparse_prefill_enabled();
+    const int64_t direct_sparse_prefill_max_tokens = skippy_glm_dsa_direct_sparse_prefill_max_tokens();
     const bool direct_sparse_decode_shape =
             n_direct_sparse_stream > 0 &&
             n_direct_sparse_batch == 1 &&
             ubatch.n_tokens == n_direct_sparse_stream;
     const bool direct_sparse_prefill_shape =
-            skippy_glm_dsa_direct_sparse_prefill_enabled() &&
-            n_direct_sparse_batch <= skippy_glm_dsa_direct_sparse_prefill_max_tokens();
+            direct_sparse_prefill_enabled &&
+            n_direct_sparse_batch <= direct_sparse_prefill_max_tokens;
+    const bool direct_sparse_large_prefill_shape =
+            direct_sparse_prefill_enabled &&
+            n_direct_sparse_batch > direct_sparse_prefill_max_tokens &&
+            dense_sparse_mask_bytes > dense_sparse_mask_limit;
     const bool direct_sparse_token_shape_allowed =
             direct_sparse_decode_shape ||
-            direct_sparse_prefill_shape;
+            direct_sparse_prefill_shape ||
+            direct_sparse_large_prefill_shape;
     const bool direct_sparse_enabled = skippy_glm_dsa_direct_sparse_attn_enabled();
     const bool direct_sparse_kq_b_ok = kq_b == nullptr;
     const bool direct_sparse_sinks_ok = sinks == nullptr;
@@ -2866,11 +2891,14 @@ ggml_tensor * llm_graph_context::build_attn(
             ubatch.n_tokens,
             n_direct_sparse_batch,
             n_direct_sparse_stream,
-            skippy_glm_dsa_direct_sparse_prefill_max_tokens(),
+            direct_sparse_prefill_max_tokens,
+            dense_sparse_mask_bytes,
+            dense_sparse_mask_limit,
             direct_sparse_enabled,
-            skippy_glm_dsa_direct_sparse_prefill_enabled(),
+            direct_sparse_prefill_enabled,
             direct_sparse_decode_shape,
             direct_sparse_prefill_shape,
+            direct_sparse_large_prefill_shape,
             direct_sparse_token_shape_allowed,
             direct_sparse_kq_b_ok,
             direct_sparse_sinks_ok,

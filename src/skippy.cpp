@@ -1563,6 +1563,21 @@ static uint32_t skippy_glm_dsa_direct_sparse_prefill_max_tokens() {
     return skippy_env_u32("SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MAX_TOKENS", 32, 1, 4096);
 }
 
+static uint64_t skippy_glm_dsa_dense_sparse_mask_max_bytes() {
+    const char * value = std::getenv("SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES");
+    if (value == nullptr || value[0] == '\0') {
+        return 512ULL * 1024ULL * 1024ULL;
+    }
+
+    char * end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+        return UINT64_MAX;
+    }
+    return parsed;
+}
+
 static bool skippy_name_starts_with(const char * name, const char * prefix) {
     return name != nullptr && std::strncmp(name, prefix, std::strlen(prefix)) == 0;
 }
@@ -1746,6 +1761,14 @@ static void skippy_glm_dsa_log_direct_sparse_decision_for_tensor(
     const int64_t sparse_streams = top_k != nullptr ? top_k->ne[2] : -1;
     const uint32_t prefill_cap = skippy_glm_dsa_direct_sparse_prefill_max_tokens();
     const bool prefill_enabled = skippy_glm_dsa_direct_sparse_prefill_enabled();
+    const ggml_tensor * dense_mask_shape = nullptr;
+    if (tensor->op == GGML_OP_DSA_SPARSE_ATTN) {
+        dense_mask_shape = tensor->src[3];
+    } else if (tensor->op == GGML_OP_DSA_SPARSE_MASK) {
+        dense_mask_shape = tensor;
+    }
+    const uint64_t dense_mask_bytes = dense_mask_shape != nullptr ? ggml_nbytes(dense_mask_shape) : 0;
+    const uint64_t dense_mask_limit = skippy_glm_dsa_dense_sparse_mask_max_bytes();
     const bool decode_shape =
             sparse_streams > 0 &&
             sparse_batch == 1 &&
@@ -1754,19 +1777,26 @@ static void skippy_glm_dsa_log_direct_sparse_decision_for_tensor(
             prefill_enabled &&
             sparse_batch >= 1 &&
             sparse_batch <= static_cast<int64_t>(prefill_cap);
-    const bool token_shape_allowed = decode_shape || prefill_shape;
+    const bool large_prefill_shape =
+            prefill_enabled &&
+            sparse_batch > static_cast<int64_t>(prefill_cap) &&
+            dense_mask_bytes > dense_mask_limit;
+    const bool token_shape_allowed = decode_shape || prefill_shape || large_prefill_shape;
 
     LLAMA_LOG_INFO(
-            "skippy: glm_dsa_direct_sparse_decision layer=%d ubatch_tokens=%lld sparse_batch=%lld sparse_streams=%lld prefill_cap=%lld direct_enabled=%d prefill_enabled=%d decode_shape=%d prefill_shape=%d token_shape_allowed=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d use_direct=%d\n",
+            "skippy: glm_dsa_direct_sparse_decision layer=%d ubatch_tokens=%lld sparse_batch=%lld sparse_streams=%lld prefill_cap=%lld dense_mask_bytes=%llu dense_mask_limit=%llu direct_enabled=%d prefill_enabled=%d decode_shape=%d prefill_shape=%d large_prefill_shape=%d token_shape_allowed=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d use_direct=%d\n",
             layer,
             static_cast<long long>(timing.token_count),
             static_cast<long long>(sparse_batch),
             static_cast<long long>(sparse_streams),
             static_cast<long long>(prefill_cap),
+            static_cast<unsigned long long>(dense_mask_bytes),
+            static_cast<unsigned long long>(dense_mask_limit),
             skippy_glm_dsa_direct_sparse_attn_enabled() ? 1 : 0,
             prefill_enabled ? 1 : 0,
             decode_shape ? 1 : 0,
             prefill_shape ? 1 : 0,
+            large_prefill_shape ? 1 : 0,
             token_shape_allowed ? 1 : 0,
             1,
             1,
