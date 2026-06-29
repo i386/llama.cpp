@@ -9531,6 +9531,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2048, 2, 1, 3}, k));
         test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {2049, 2, 1, 3}, k));
     }
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {256, 64, 1, 1}, 256));
 
     // exhaustive top_k tests
     //for (int i = 1; i < 9999; ++i) {
@@ -9806,6 +9807,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q4_K, 4, 256, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q5_K, 4, 256, 2, 33, 1));
     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_Q6_K, 4, 256, 2, 33, 1));
+    test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 32, 128, 64, 256, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F32, 33, 2, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 33, 2, 1, 4, 1));
     test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 65, 4, 2, 8, 2));
@@ -9821,6 +9823,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 16, 12, 65, 33, 4, 1, 8, 1, false, false, true));
     test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F16, 16, 12, 65, 33, 4, 1, 8, 1, false, false, true));
     test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 576, 512, 257, 1, 4, 1, 64, 1, false, true));
+    test_cases.emplace_back(new test_dsa_sparse_attn(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 576, 512, 257, 64, 8, 1, 64, 1));
 
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));
     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));

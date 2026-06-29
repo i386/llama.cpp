@@ -60,6 +60,17 @@ static int ggml_metal_glm_dsa_sparse_attn_threads_requested() {
     }
 }
 
+static int ggml_metal_glm_dsa_sparse_attn_threads_for_shape(int requested, int n_batch, int n_top_k) {
+    // Large-top-k prefill shapes are sensitive to the 256-thread sparse-attn
+    // kernel on Apple Metal and can leave rows unwritten. Keep decode and
+    // small-top-k prefill on the requested path, but cap large prefill rows to
+    // the shape that passes backend parity.
+    if (n_batch > 1 && n_top_k >= 64) {
+        return std::min(requested, 32);
+    }
+    return requested;
+}
+
 static bool ggml_metal_glm_dsa_sparse_attn_cache_topk_enabled() {
     const char * value = getenv("SKIPPY_GLM_DSA_SPARSE_ATTN_CACHE_TOPK");
     return value && atoi(value) != 0;
@@ -5052,7 +5063,8 @@ int ggml_metal_op_dsa_sparse_attn(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[4]), ida++); // top_k
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         ida++); // dst
 
-    const int nth_requested = ggml_metal_glm_dsa_sparse_attn_threads_requested();
+    const int nth_requested = ggml_metal_glm_dsa_sparse_attn_threads_for_shape(
+            ggml_metal_glm_dsa_sparse_attn_threads_requested(), ne1, ne40);
     const int head_group = use_decode_grouped ? requested_head_group : 1;
     const int max_threads_per_group = std::max(1, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)/head_group);
     const int nth = std::min(nth_requested, max_threads_per_group);
