@@ -5758,6 +5758,17 @@ kernel void kernel_argsort_f32_i32(
     const int i02 = tgpig[1];
     const int i03 = tgpig[2];
 
+    if (args.top_k == args.ne00 && ntg.x >= args.ne00) {
+        if (col < args.ne00) {
+            device int32_t * dst_row = dst
+                + args.ne0*i01
+                + args.ne0*args.ne1*i02
+                + args.ne0*args.ne1*args.ne2*i03;
+            dst_row[col] = col;
+        }
+        return;
+    }
+
     device const float * src0_row = (device const float *) (src0 + args.nb01*i01 + args.nb02*i02 + args.nb03*i03);
 
     // initialize indices

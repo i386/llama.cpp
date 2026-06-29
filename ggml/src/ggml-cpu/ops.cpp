@@ -8290,9 +8290,18 @@ static void ggml_compute_forward_top_k_f32(
 
         int32_t * dst_data = (int32_t *)((char *) dst->data + i*nb1);
 
-        std::copy(tmp, tmp + top_k, dst_data);
+        if (top_k == ne00) {
+            // Full-width top-k contains every index. Use canonical index order so
+            // sideband-producing graphs do not depend on backend-specific sort
+            // order for an otherwise order-invariant set.
+            for (int64_t j = 0; j < ne00; j++) {
+                dst_data[j] = j;
+            }
+            continue;
+        }
 
         // emphasize that the order is not important
+        std::copy(tmp, tmp + top_k, dst_data);
         if (top_k > 1) {
             std::swap(dst_data[0], dst_data[1]);
         }
